@@ -21,11 +21,18 @@ Verl, Slime, and Training Gym without modifying those framework repos.
   Modal + Verl OPD smoke tests.
 - [docs/sdpo-learnings.md](docs/sdpo-learnings.md): practical notes from the
   Modal + Verl SDPO bridge smoke tests.
+- [docs/kimi-k26-sdpo-modal.md](docs/kimi-k26-sdpo-modal.md): Kimi K2.6 SDPO
+  sizing and topology notes for Modal H200/B200 runs.
+- [docs/kimi-k26-gpu-layout.html](docs/kimi-k26-gpu-layout.html): a
+  GitHub Pages-ready infographic for Kimi K2.6 GPU and distributed training
+  layouts.
 - [scripts/modal_verl_qwen35_opd.py](scripts/modal_verl_qwen35_opd.py): a Modal
   + Verl smoke launcher for Qwen3.5 on-policy distillation with `k1` loss.
 - [scripts/modal_verl_sdpo.py](scripts/modal_verl_sdpo.py): a Modal + Verl
   SDPO bridge that uses feedback-conditioned prompts, a custom reward function,
   and Verl's existing on-policy distillation path without modifying Verl.
+- [scripts/modal_verl_kimi_k26_sdpo.py](scripts/modal_verl_kimi_k26_sdpo.py): a
+  larger-model SDPO bridge with Kimi K2.6 H200, B200, and H200 LoRA topologies.
 - [docs/index.html](docs/index.html): a GitHub Pages-ready infographic for
   on-policy distillation and self-distillation as continual learning.
 
@@ -89,6 +96,10 @@ The script defaults to:
 - image: `verlai/verl:vllm020.dev1`
 - loss: `distillation.distillation_loss.loss_mode=k1`
 - policy-gradient OPD: `distillation.distillation_loss.use_policy_gradient=True`
+
+Set `VERL_IMAGE_TAG` to try a newer compatible amd64 Verl image. Avoid
+`.aarch64.*` tags on standard Modal GPU workers unless the target runtime is
+explicitly ARM.
 
 For another simple Hugging Face dataset, provide the split and column mapping.
 The script will create Verl-compatible parquet files in the Modal volume:
@@ -163,6 +174,24 @@ Exact SDPO from the reference implementation adds `loss_mode=sdpo`,
 self-distillation batches, and EMA/trust-region self-teacher updates inside the
 trainer. This repo keeps Verl unchanged, so the script implements the closest
 composition available through public Verl hooks.
+
+## Kimi K2.6 SDPO Topologies
+
+The Kimi launcher keeps large-model experiments separate from the small smoke
+scripts:
+
+```bash
+python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+  --mode h200-lora \
+  --train-rows 8 \
+  --val-rows 4 \
+  --total-training-steps 1
+```
+
+Use `--mode h200-full` or `--mode b200-full` only after validating model access,
+checkpoint format, dataset parquet files, and reward behavior. See
+[docs/kimi-k26-sdpo-modal.md](docs/kimi-k26-sdpo-modal.md) for GPU sizing, TP,
+EP, NCCL, H200, B200, and LoRA guidance.
 
 ## Roadmap
 

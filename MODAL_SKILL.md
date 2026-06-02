@@ -93,6 +93,19 @@ the image is still building or workers have not started.
   alignment problems.
 - For a smoke run, use tiny batches, short prompt/response lengths,
   `trainer.total_training_steps=1`, `trainer.logger=console`, and W&B disabled.
-- Prefer an x86_64/amd64 Verl image for Modal GPU workers, for example
-  `verlai/verl:vllm020.dev1`. Avoid ARM-only tags such as `.aarch64.*` unless
-  the target platform is explicitly ARM.
+
+## Verl Image Selection
+
+- The Modal launchers default to `verlai/verl:vllm020.dev1`, which is an
+  x86_64/amd64-friendly Verl image for Modal GPU workers.
+- Override the image per run with `VERL_IMAGE_TAG` when testing a newer
+  compatible Verl image:
+
+  ```bash
+  VERL_IMAGE_TAG=verlai/verl:<compatible-amd64-tag> \
+    python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py
+  ```
+
+- Avoid ARM-only tags such as `verlai/verl:vllm020.aarch64.dev1` on normal
+  Modal GPU workers. Use `.aarch64.*` images only when the target runtime is
+  explicitly ARM, otherwise the image can fail before Verl or Ray starts.

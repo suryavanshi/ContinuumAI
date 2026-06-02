@@ -297,6 +297,24 @@
         font-size: 1.25rem;
       }
 
+      .panel-link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        margin-top: 14px;
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: #ffffff;
+        background: var(--ink);
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .panel-link:focus,
+      .panel-link:hover {
+        background: var(--blue);
+      }
+
       .step-list {
         display: grid;
         gap: 12px;
@@ -749,6 +767,9 @@
               run manifests, eval comparison, and operational notes. Framework
               code remains upstream.
             </p>
+            <a class="panel-link" href="kimi-k26-gpu-layout.html">
+              View Kimi K2.6 GPU layout
+            </a>
           </div>
 
           <div class="rail">
