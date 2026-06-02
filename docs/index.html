@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ContinuumAI: On-Policy Distillation for Continual Learning</title>
+    <meta
+      name="description"
+      content="An infographic explaining on-policy distillation, on-policy self-distillation, and continual learning loops for open model post-training."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1d2330;
+        --muted: #637083;
+        --line: #d7dde7;
+        --paper: #f7f8fb;
+        --panel: #ffffff;
+        --soft: #edf2f7;
+        --teal: #0f766e;
+        --teal-soft: #dff4f1;
+        --blue: #2563eb;
+        --blue-soft: #e6efff;
+        --rose: #be3158;
+        --rose-soft: #fde7ee;
+        --amber: #b7791f;
+        --amber-soft: #fff1cf;
+        --green: #2f7d32;
+        --green-soft: #e4f4df;
+        --shadow: 0 18px 60px rgba(30, 41, 59, 0.12);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 248, 251, 0.98)),
+          var(--paper);
+      }
+
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        min-height: 68vh;
+        display: grid;
+        align-items: center;
+        padding: 56px 0 28px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
+        gap: 42px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--teal);
+        font-size: 0.82rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--teal);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 780px;
+        margin-bottom: 18px;
+        font-size: 5.6rem;
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      .lede {
+        max-width: 720px;
+        margin-bottom: 26px;
+        color: var(--muted);
+        font-size: 1.22rem;
+        line-height: 1.62;
+      }
+
+      .tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .tag {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.74);
+        padding: 8px 12px;
+        color: #344054;
+        font-size: 0.88rem;
+        font-weight: 700;
+      }
+
+      .system-map {
+        position: relative;
+        display: grid;
+        gap: 14px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: var(--shadow);
+      }
+
+      .map-row {
+        display: grid;
+        grid-template-columns: 1fr 44px 1fr;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .node {
+        min-height: 98px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 16px;
+      }
+
+      .node strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 1rem;
+      }
+
+      .node span {
+        color: var(--muted);
+        font-size: 0.92rem;
+        line-height: 1.45;
+      }
+
+      .arrow {
+        display: grid;
+        place-items: center;
+        width: 44px;
+        height: 44px;
+        border-radius: 999px;
+        color: var(--blue);
+        background: var(--blue-soft);
+        font-size: 1.55rem;
+        font-weight: 900;
+      }
+
+      .node.policy {
+        border-color: rgba(15, 118, 110, 0.32);
+        background: var(--teal-soft);
+      }
+
+      .node.teacher {
+        border-color: rgba(37, 99, 235, 0.28);
+        background: var(--blue-soft);
+      }
+
+      .node.feedback {
+        border-color: rgba(190, 49, 88, 0.28);
+        background: var(--rose-soft);
+      }
+
+      .node.update {
+        border-color: rgba(183, 121, 31, 0.3);
+        background: var(--amber-soft);
+      }
+
+      section {
+        padding: 54px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 24px;
+      }
+
+      h2 {
+        margin-bottom: 8px;
+        font-size: 3rem;
+        line-height: 1.05;
+        letter-spacing: 0;
+      }
+
+      .section-head p {
+        max-width: 560px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .compare {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 22px;
+        box-shadow: 0 10px 30px rgba(30, 41, 59, 0.06);
+      }
+
+      .panel h3 {
+        margin-bottom: 12px;
+        font-size: 1.25rem;
+      }
+
+      .step-list {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .step-list li {
+        display: grid;
+        grid-template-columns: 34px 1fr;
+        gap: 12px;
+        align-items: start;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .num {
+        display: grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 999px;
+        background: var(--soft);
+        color: var(--ink);
+        font-weight: 800;
+        font-size: 0.82rem;
+      }
+
+      .loss-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .metric {
+        min-height: 152px;
+        border-radius: 8px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .metric .label {
+        display: block;
+        margin-bottom: 16px;
+        color: var(--muted);
+        font-size: 0.8rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1.18rem;
+      }
+
+      .metric p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+      }
+
+      .phase {
+        min-height: 220px;
+        padding: 20px;
+        border-right: 1px solid var(--line);
+      }
+
+      .phase:last-child {
+        border-right: 0;
+      }
+
+      .phase b {
+        display: inline-grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        margin-bottom: 18px;
+        border-radius: 999px;
+        color: var(--panel);
+        background: var(--ink);
+      }
+
+      .phase h3 {
+        min-height: 54px;
+        margin-bottom: 10px;
+        font-size: 1.05rem;
+      }
+
+      .phase p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      .stack {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 18px;
+      }
+
+      .rail {
+        display: grid;
+        gap: 12px;
+      }
+
+      .rail-item {
+        border-left: 5px solid var(--blue);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 16px 18px;
+        box-shadow: 0 8px 24px rgba(30, 41, 59, 0.06);
+      }
+
+      .rail-item:nth-child(2) {
+        border-left-color: var(--teal);
+      }
+
+      .rail-item:nth-child(3) {
+        border-left-color: var(--rose);
+      }
+
+      .rail-item:nth-child(4) {
+        border-left-color: var(--amber);
+      }
+
+      .rail-item strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .rail-item span {
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .guardrails {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .guard {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 18px;
+      }
+
+      .guard strong {
+        display: block;
+        margin-bottom: 8px;
+      }
+
+      .guard p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      footer {
+        padding: 34px 0 50px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          width: min(100% - 24px, 720px);
+        }
+
+        .hero {
+          min-height: auto;
+          padding-top: 38px;
+        }
+
+        .hero-grid,
+        .compare,
+        .stack,
+        .section-head {
+          grid-template-columns: 1fr;
+        }
+
+        .section-head {
+          display: grid;
+        }
+
+        h1 {
+          font-size: 3.7rem;
+        }
+
+        h2 {
+          font-size: 2.3rem;
+        }
+
+        .lede {
+          font-size: 1.1rem;
+        }
+
+        .loss-strip,
+        .guardrails {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .timeline {
+          grid-template-columns: 1fr;
+        }
+
+        .phase {
+          min-height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .phase:last-child {
+          border-bottom: 0;
+        }
+      }
+
+      @media (max-width: 560px) {
+        h1 {
+          font-size: 2.6rem;
+        }
+
+        h2 {
+          font-size: 1.9rem;
+        }
+
+        .map-row {
+          grid-template-columns: 1fr;
+        }
+
+        .arrow {
+          transform: rotate(90deg);
+        }
+
+        .loss-strip,
+        .guardrails {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow">ContinuumAI</div>
+            <h1>On-policy distillation for models that keep learning.</h1>
+            <p class="lede">
+              A practical loop for post-training open models: sample from the
+              current policy, collect feedback, distill dense guidance, update,
+              evaluate drift, and repeat.
+            </p>
+            <div class="tag-row" aria-label="Key technologies">
+              <span class="tag">Verl</span>
+              <span class="tag">Slime</span>
+              <span class="tag">Training Gym</span>
+              <span class="tag">Modal GPUs</span>
+              <span class="tag">Qwen / Kimi</span>
+            </div>
+          </div>
+
+          <div class="system-map" aria-label="On-policy learning loop diagram">
+            <div class="map-row">
+              <div class="node policy">
+                <strong>Current policy</strong>
+                <span>Samples answers, tool calls, code, or reasoning traces.</span>
+              </div>
+              <div class="arrow">→</div>
+              <div class="node feedback">
+                <strong>Environment</strong>
+                <span>Returns rewards, tests, verifier output, traces, or judge comments.</span>
+              </div>
+            </div>
+            <div class="map-row">
+              <div class="node teacher">
+                <strong>Teacher signal</strong>
+                <span>Strong model, frozen checkpoint, or feedback-conditioned self-teacher.</span>
+              </div>
+              <div class="arrow">→</div>
+              <div class="node update">
+                <strong>Policy update</strong>
+                <span>Combines RL reward with dense token-level distillation losses.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Two Signals</div>
+            <h2>Teacher guidance stays on the policy's own data.</h2>
+          </div>
+          <p>
+            The crucial move is to score trajectories the current model actually
+            sampled. That keeps supervision aligned with the policy's mistakes,
+            strengths, and changing distribution.
+          </p>
+        </div>
+
+        <div class="compare">
+          <article class="panel">
+            <h3>On-policy distillation</h3>
+            <ol class="step-list">
+              <li><span class="num">1</span><span>Student generates trajectories from the current checkpoint.</span></li>
+              <li><span class="num">2</span><span>A teacher scores those same tokens with log probabilities.</span></li>
+              <li><span class="num">3</span><span>The trainer applies dense losses such as k1, reverse KL, or token KL.</span></li>
+              <li><span class="num">4</span><span>Scalar task rewards can be mixed in for verifiable outcomes.</span></li>
+            </ol>
+          </article>
+
+          <article class="panel">
+            <h3>On-policy self-distillation</h3>
+            <ol class="step-list">
+              <li><span class="num">1</span><span>The model makes an attempt on the live task distribution.</span></li>
+              <li><span class="num">2</span><span>Feedback arrives from tests, tools, judges, or verifiers.</span></li>
+              <li><span class="num">3</span><span>The same model, or a frozen copy, produces feedback-conditioned targets.</span></li>
+              <li><span class="num">4</span><span>The policy learns from both outcome reward and dense corrective signal.</span></li>
+            </ol>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Loss Anatomy</div>
+            <h2>Dense feedback fills the gaps between sparse rewards.</h2>
+          </div>
+          <p>
+            Verifiers can tell you if a solution worked. Distillation can show
+            which tokens looked recoverable, overconfident, or worth preserving.
+          </p>
+        </div>
+
+        <div class="loss-strip">
+          <article class="metric">
+            <span class="label">Policy</span>
+            <strong>Current samples</strong>
+            <p>All learning data starts from the latest policy, not a stale offline distribution.</p>
+          </article>
+          <article class="metric">
+            <span class="label">Reward</span>
+            <strong>Outcome signal</strong>
+            <p>Math checks, unit tests, judges, and tools decide what actually succeeded.</p>
+          </article>
+          <article class="metric">
+            <span class="label">Distill</span>
+            <strong>Token signal</strong>
+            <p>Teacher or self-teacher logprobs create dense gradients for partial credit.</p>
+          </article>
+          <article class="metric">
+            <span class="label">Control</span>
+            <strong>Drift checks</strong>
+            <p>Eval gates protect general capability while new skills are added.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Continual Learning</div>
+            <h2>Alternate adaptation with recovery.</h2>
+          </div>
+          <p>
+            Continual learning is a cadence, not a single run. The model learns
+            from new work, then distills from stable references to reduce
+            regression before the next cycle.
+          </p>
+        </div>
+
+        <div class="timeline" aria-label="Continual learning phases">
+          <article class="phase">
+            <b>1</b>
+            <h3>Adapt</h3>
+            <p>Train on new domain tasks, codebases, tools, or user workflows.</p>
+          </article>
+          <article class="phase">
+            <b>2</b>
+            <h3>Probe</h3>
+            <p>Measure task gains, reward quality, drift, refusals, and regressions.</p>
+          </article>
+          <article class="phase">
+            <b>3</b>
+            <h3>Recover</h3>
+            <p>Use a teacher or frozen checkpoint to restore broad behavior.</p>
+          </article>
+          <article class="phase">
+            <b>4</b>
+            <h3>Compare</h3>
+            <p>Keep checkpoints only when eval deltas justify the cost and risk.</p>
+          </article>
+          <article class="phase">
+            <b>5</b>
+            <h3>Repeat</h3>
+            <p>Feed the next task stream into the improved policy distribution.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Infrastructure</div>
+            <h2>The hard part is coordinating fast loops.</h2>
+          </div>
+          <p>
+            Trainer, rollout engine, teacher, environments, and checkpoints have
+            to move together. Modal supplies elastic compute; Verl and Slime
+            supply the algorithm and distributed training machinery.
+          </p>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <h3>Control plane</h3>
+            <p>
+              ContinuumAI should stay thin: experiment specs, launch adapters,
+              run manifests, eval comparison, and operational notes. Framework
+              code remains upstream.
+            </p>
+          </div>
+
+          <div class="rail">
+            <div class="rail-item">
+              <strong>Trainer</strong>
+              <span>Verl, Slime, or Training Gym performs policy updates and checkpointing.</span>
+            </div>
+            <div class="rail-item">
+              <strong>Rollout engine</strong>
+              <span>vLLM or SGLang samples current-policy trajectories at high throughput.</span>
+            </div>
+            <div class="rail-item">
+              <strong>Teacher and feedback</strong>
+              <span>External teachers, frozen checkpoints, tools, tests, and sandboxes produce dense and scalar signals.</span>
+            </div>
+            <div class="rail-item">
+              <strong>Modal substrate</strong>
+              <span>GPU functions, volumes, logs, secrets, and sandboxes keep experiments repeatable.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Guardrails</div>
+            <h2>Measure the learning, not just the loss.</h2>
+          </div>
+          <p>
+            Distillation can preserve behavior or amplify a bad target. Keep the
+            teacher signal, reward signal, and eval signal separately visible.
+          </p>
+        </div>
+
+        <div class="guardrails">
+          <article class="guard">
+            <strong>Separate metrics</strong>
+            <p>Log reward, distillation loss, KL, length, pass rates, and eval deltas independently.</p>
+          </article>
+          <article class="guard">
+            <strong>Teacher hygiene</strong>
+            <p>Start with same-family models before cross-family teachers to avoid tokenizer alignment failures.</p>
+          </article>
+          <article class="guard">
+            <strong>Regression gates</strong>
+            <p>Compare against base, previous checkpoint, and frozen recovery teacher before promotion.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        ContinuumAI infographic. Built as static HTML for GitHub Pages.
+      </footer>
+    </main>
+  </body>
+</html>
