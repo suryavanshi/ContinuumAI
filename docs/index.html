@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ContinuumAI: On-Policy Distillation for Continual Learning</title>
+    <title>ContinuumAI: OPD vs SDPO for Continual Learning</title>
     <meta
       name="description"
-      content="An infographic explaining on-policy distillation, on-policy self-distillation, and continual learning loops for open model post-training."
+      content="An infographic comparing on-policy distillation and Self-Distilled Policy Optimization for continual learning with open models."
     />
     <style>
       :root {
@@ -222,6 +222,66 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 18px;
+      }
+
+      .method-card {
+        display: grid;
+        gap: 16px;
+      }
+
+      .method-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        align-items: start;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        border-radius: 999px;
+        padding: 6px 10px;
+        color: var(--panel);
+        background: var(--ink);
+        font-size: 0.75rem;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+      }
+
+      .method-card p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.52;
+      }
+
+      .signal-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .signal-list li {
+        border-left: 4px solid var(--teal);
+        border-radius: 8px;
+        background: var(--soft);
+        padding: 10px 12px;
+        color: var(--muted);
+        line-height: 1.42;
+      }
+
+      .method-card.sdpo .signal-list li {
+        border-left-color: var(--rose);
+      }
+
+      .method-card.sdpo {
+        border-color: rgba(190, 49, 88, 0.28);
+      }
+
+      .method-card.opd {
+        border-color: rgba(15, 118, 110, 0.28);
       }
 
       .panel {
@@ -499,16 +559,16 @@
         <div class="hero-grid">
           <div>
             <div class="eyebrow">ContinuumAI</div>
-            <h1>On-policy distillation for models that keep learning.</h1>
+            <h1>OPD vs SDPO for continual learning.</h1>
             <p class="lede">
-              A practical loop for post-training open models: sample from the
-              current policy, collect feedback, distill dense guidance, update,
-              evaluate drift, and repeat.
+              OPD uses a teacher to score what the policy actually sampled.
+              SDPO turns the model's own attempts and feedback into dense
+              self-teaching signals, making continual learning less brittle.
             </p>
             <div class="tag-row" aria-label="Key technologies">
+              <span class="tag">OPD</span>
+              <span class="tag">SDPO</span>
               <span class="tag">Verl</span>
-              <span class="tag">Slime</span>
-              <span class="tag">Training Gym</span>
               <span class="tag">Modal GPUs</span>
               <span class="tag">Qwen / Kimi</span>
             </div>
@@ -528,8 +588,8 @@
             </div>
             <div class="map-row">
               <div class="node teacher">
-                <strong>Teacher signal</strong>
-                <span>Strong model, frozen checkpoint, or feedback-conditioned self-teacher.</span>
+                <strong>Dense guidance</strong>
+                <span>External teacher for OPD; feedback-conditioned self-teacher for SDPO.</span>
               </div>
               <div class="arrow">→</div>
               <div class="node update">
@@ -544,35 +604,47 @@
       <section>
         <div class="section-head">
           <div>
-            <div class="eyebrow">Two Signals</div>
-            <h2>Teacher guidance stays on the policy's own data.</h2>
+            <div class="eyebrow">Core Difference</div>
+            <h2>OPD imports a teacher. SDPO grows one from feedback.</h2>
           </div>
           <p>
-            The crucial move is to score trajectories the current model actually
-            sampled. That keeps supervision aligned with the policy's mistakes,
-            strengths, and changing distribution.
+            Both methods stay on-policy: the learning signal is attached to
+            trajectories the current model actually sampled. They differ in
+            where dense supervision comes from and how useful feedback becomes.
           </p>
         </div>
 
         <div class="compare">
-          <article class="panel">
-            <h3>On-policy distillation</h3>
-            <ol class="step-list">
-              <li><span class="num">1</span><span>Student generates trajectories from the current checkpoint.</span></li>
-              <li><span class="num">2</span><span>A teacher scores those same tokens with log probabilities.</span></li>
-              <li><span class="num">3</span><span>The trainer applies dense losses such as k1, reverse KL, or token KL.</span></li>
-              <li><span class="num">4</span><span>Scalar task rewards can be mixed in for verifiable outcomes.</span></li>
-            </ol>
+          <article class="panel method-card opd">
+            <div class="method-top">
+              <h3>OPD</h3>
+              <span class="badge">Teacher</span>
+            </div>
+            <p>
+              On-policy distillation asks a stronger or frozen teacher to score
+              the student's sampled trajectory with token-level probabilities.
+            </p>
+            <ul class="signal-list">
+              <li>Best when a reliable teacher is available.</li>
+              <li>Useful for recovery distillation after domain updates.</li>
+              <li>Can preserve broad behavior while adding new skills.</li>
+            </ul>
           </article>
 
-          <article class="panel">
-            <h3>On-policy self-distillation</h3>
-            <ol class="step-list">
-              <li><span class="num">1</span><span>The model makes an attempt on the live task distribution.</span></li>
-              <li><span class="num">2</span><span>Feedback arrives from tests, tools, judges, or verifiers.</span></li>
-              <li><span class="num">3</span><span>The same model, or a frozen copy, produces feedback-conditioned targets.</span></li>
-              <li><span class="num">4</span><span>The policy learns from both outcome reward and dense corrective signal.</span></li>
-            </ol>
+          <article class="panel method-card sdpo">
+            <div class="method-top">
+              <h3>SDPO</h3>
+              <span class="badge">Self-teacher</span>
+            </div>
+            <p>
+              Self-Distilled Policy Optimization conditions the model on its
+              own attempts, successes, and rich feedback to create dense targets.
+            </p>
+            <ul class="signal-list">
+              <li>Best when environments produce useful feedback.</li>
+              <li>Turns test errors and critiques into token-level guidance.</li>
+              <li>Can keep improving as the policy and self-teacher improve.</li>
+            </ul>
           </article>
         </div>
       </section>
@@ -581,11 +653,12 @@
         <div class="section-head">
           <div>
             <div class="eyebrow">Loss Anatomy</div>
-            <h2>Dense feedback fills the gaps between sparse rewards.</h2>
+            <h2>SDPO turns feedback into reusable learning signal.</h2>
           </div>
           <p>
-            Verifiers can tell you if a solution worked. Distillation can show
-            which tokens looked recoverable, overconfident, or worth preserving.
+            Sparse rewards say whether an attempt worked. OPD and SDPO add
+            dense token guidance; SDPO is especially useful when failed attempts
+            come with explanations, traces, or test errors.
           </p>
         </div>
 
@@ -601,14 +674,14 @@
             <p>Math checks, unit tests, judges, and tools decide what actually succeeded.</p>
           </article>
           <article class="metric">
-            <span class="label">Distill</span>
-            <strong>Token signal</strong>
-            <p>Teacher or self-teacher logprobs create dense gradients for partial credit.</p>
+            <span class="label">OPD</span>
+            <strong>External guidance</strong>
+            <p>A teacher or frozen checkpoint scores sampled trajectories.</p>
           </article>
           <article class="metric">
-            <span class="label">Control</span>
-            <strong>Drift checks</strong>
-            <p>Eval gates protect general capability while new skills are added.</p>
+            <span class="label">SDPO</span>
+            <strong>Feedback guidance</strong>
+            <p>The model uses attempts and feedback to teach its future policy.</p>
           </article>
         </div>
       </section>
@@ -617,40 +690,40 @@
         <div class="section-head">
           <div>
             <div class="eyebrow">Continual Learning</div>
-            <h2>Alternate adaptation with recovery.</h2>
+            <h2>SDPO helps the model learn without waiting for a perfect teacher.</h2>
           </div>
           <p>
-            Continual learning is a cadence, not a single run. The model learns
-            from new work, then distills from stable references to reduce
-            regression before the next cycle.
+            Continual learning needs a repeatable way to absorb new domains,
+            learn from mistakes, and preserve old skills. OPD supplies recovery;
+            SDPO supplies feedback-aware adaptation.
           </p>
         </div>
 
         <div class="timeline" aria-label="Continual learning phases">
           <article class="phase">
             <b>1</b>
-            <h3>Adapt</h3>
-            <p>Train on new domain tasks, codebases, tools, or user workflows.</p>
+            <h3>Attempt</h3>
+            <p>The current policy samples solutions on new tasks and domains.</p>
           </article>
           <article class="phase">
             <b>2</b>
-            <h3>Probe</h3>
-            <p>Measure task gains, reward quality, drift, refusals, and regressions.</p>
+            <h3>Collect Feedback</h3>
+            <p>Tests, tools, verifiers, or judges explain what worked and what failed.</p>
           </article>
           <article class="phase">
             <b>3</b>
-            <h3>Recover</h3>
-            <p>Use a teacher or frozen checkpoint to restore broad behavior.</p>
+            <h3>Self-Distill</h3>
+            <p>SDPO converts successes and feedback into dense corrective targets.</p>
           </article>
           <article class="phase">
             <b>4</b>
-            <h3>Compare</h3>
-            <p>Keep checkpoints only when eval deltas justify the cost and risk.</p>
+            <h3>Recover With OPD</h3>
+            <p>A stable teacher or checkpoint reduces regression on older behavior.</p>
           </article>
           <article class="phase">
             <b>5</b>
-            <h3>Repeat</h3>
-            <p>Feed the next task stream into the improved policy distribution.</p>
+            <h3>Promote</h3>
+            <p>Advance only when task gains, drift checks, and cost all pass.</p>
           </article>
         </div>
       </section>

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import modal
 
 
-APP_NAME = "continuum-verl-opd"
+APP_NAME = "continuum-verl-sdpo"
 VERL_IMAGE_TAG = os.environ.get("VERL_IMAGE_TAG", "verlai/verl:vllm020.dev1")
 THIS_FILE = pathlib.Path(__file__).resolve()
 DEFAULT_VERL_LOCAL_DIR = THIS_FILE.parents[2] / "verl" if len(THIS_FILE.parents) > 2 else pathlib.Path("/opt/verl")
@@ -20,10 +20,11 @@ VERL_LOCAL_DIR = pathlib.Path(
 REMOTE_VERL_DIR = "/opt/verl"
 CACHE_DIR = pathlib.Path("/cache")
 DATA_ROOT = CACHE_DIR / "data"
+RUNTIME_DIR = CACHE_DIR / "runtime"
 LOG_DIR = CACHE_DIR / "logs"
 
 app = modal.App(APP_NAME)
-cache_volume = modal.Volume.from_name("continuum-verl-opd-cache", create_if_missing=True)
+cache_volume = modal.Volume.from_name("continuum-verl-sdpo-cache", create_if_missing=True)
 
 image = (
     modal.Image.from_registry(VERL_IMAGE_TAG)
@@ -67,6 +68,52 @@ image = (
 )
 
 
+SDPO_REWARD_CODE = r'''
+import re
+
+
+def _normalize(value):
+    value = str(value or "").strip()
+    value = value.replace(",", "")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip().lower()
+
+
+def _extract_answer(text):
+    text = str(text or "")
+    marker = re.findall(r"####\s*([^\n]+)", text)
+    if marker:
+        return marker[-1].strip()
+    tagged = re.findall(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL | re.IGNORECASE)
+    if tagged:
+        return tagged[-1].strip()
+    boxed = re.findall(r"\\boxed\{([^{}]+)\}", text)
+    if boxed:
+        return boxed[-1].strip()
+    number = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+    if number:
+        return number[-1]
+    letter = re.findall(r"\b([A-D])\b", text.upper())
+    if letter:
+        return letter[-1]
+    return text.strip()
+
+
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, **_):
+    extra_info = extra_info or {}
+    extracted = _extract_answer(solution_str)
+    score = 1.0 if _normalize(extracted) == _normalize(ground_truth) else 0.0
+    feedback = extra_info.get("feedback_raw", "")
+    return {
+        "score": score,
+        "extracted_answer": extracted,
+        "feedback_raw": feedback,
+        "sdpo_feedback_available": bool(feedback),
+        "data_source": data_source,
+    }
+'''
+
+
 def _run(cmd: list[str], cwd: str = REMOTE_VERL_DIR, env: dict[str, str] | None = None) -> None:
     printable = " ".join(cmd)
     print(f"$ {printable}", flush=True)
@@ -102,7 +149,14 @@ def _dataset_paths(dataset: str) -> tuple[pathlib.Path, pathlib.Path]:
     return data_dir / "train.parquet", data_dir / "test.parquet"
 
 
-def _prepare_hf_dataset_script(
+def _write_reward_module() -> pathlib.Path:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    reward_path = RUNTIME_DIR / "sdpo_reward.py"
+    reward_path.write_text(SDPO_REWARD_CODE)
+    return reward_path
+
+
+def _prepare_sdpo_dataset_script(
     *,
     out_dir: pathlib.Path,
     hf_dataset: str,
@@ -111,11 +165,15 @@ def _prepare_hf_dataset_script(
     val_split: str,
     prompt_column: str,
     answer_column: str,
+    feedback_column: str | None,
+    previous_attempt_column: str | None,
     data_source: str,
     ability: str,
-    instruction_suffix: str,
     train_rows: int,
     val_rows: int,
+    instruction_suffix: str,
+    static_feedback: str,
+    reprompt_template: str,
 ) -> str:
     return f"""
 import pathlib
@@ -139,22 +197,52 @@ def limit_rows(split, rows):
 train = limit_rows(train, {int(train_rows)})
 val = limit_rows(val, {int(val_rows)})
 
+prompt_column = {prompt_column!r}
+answer_column = {answer_column!r}
+feedback_column = {feedback_column!r}
+previous_attempt_column = {previous_attempt_column!r}
+instruction_suffix = {instruction_suffix!r}
+static_feedback = {static_feedback!r}
+reprompt_template = {reprompt_template!r}
+
+def read_column(example, column, default=""):
+    if not column:
+        return default
+    value = example.get(column, default)
+    return "" if value is None else str(value)
+
+def make_prompt(base_prompt, previous_attempt, feedback):
+    base_prompt = base_prompt.strip()
+    if instruction_suffix:
+        base_prompt = base_prompt + " " + instruction_suffix
+    if previous_attempt or feedback:
+        return reprompt_template.format(
+            prompt=base_prompt,
+            solution=previous_attempt,
+            feedback=feedback,
+        )
+    return base_prompt
+
 def make_map_fn(split_name):
     def process_fn(example, idx):
-        prompt_raw = str(example.get({prompt_column!r}, ""))
-        answer_raw = str(example.get({answer_column!r}, "")) if {answer_column!r} else ""
-        suffix = {instruction_suffix!r}
-        content = prompt_raw if not suffix else prompt_raw + " " + suffix
+        prompt_raw = read_column(example, prompt_column)
+        answer_raw = read_column(example, answer_column)
+        feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
+        previous_attempt = read_column(example, previous_attempt_column)
+        prompt = make_prompt(prompt_raw, previous_attempt, feedback_raw)
         return {{
             "data_source": {data_source!r},
-            "prompt": [{{"role": "user", "content": content}}],
+            "prompt": [{{"role": "user", "content": prompt}}],
             "ability": {ability!r},
             "reward_model": {{"style": "rule", "ground_truth": answer_raw}},
             "extra_info": {{
                 "split": split_name,
                 "index": idx,
+                "original_prompt": prompt_raw,
                 "answer": answer_raw,
-                "prompt": prompt_raw,
+                "feedback_raw": feedback_raw,
+                "previous_attempt": previous_attempt,
+                "sdpo_bridge": True,
             }},
         }}
     return process_fn
@@ -173,79 +261,50 @@ print("prepared", len(train), "train rows and", len(val), "val rows from", hf_da
     timeout=1800,
     startup_timeout=1800,
 )
-def prepare_dataset(
-    dataset: str = "gsm8k",
-    train_rows: int = 8,
-    val_rows: int = 4,
-    hf_dataset: str | None = None,
-    hf_config: str | None = None,
+def prepare_sdpo_dataset(
+    dataset: str = "gsm8k_sdpo",
+    hf_dataset: str = "openai/gsm8k",
+    hf_config: str | None = "main",
     train_split: str = "train",
     val_split: str = "test",
     prompt_column: str = "question",
     answer_column: str = "answer",
-    data_source: str | None = None,
-    ability: str = "general",
-    instruction_suffix: str = "",
+    feedback_column: str | None = None,
+    previous_attempt_column: str | None = None,
+    data_source: str = "openai/gsm8k",
+    ability: str = "math",
+    train_rows: int = 8,
+    val_rows: int = 4,
+    instruction_suffix: str = 'Let us think step by step and output the final answer after "####".',
+    static_feedback: str = "",
+    reprompt_template: str = (
+        "{prompt}\\n\\n"
+        "Previous attempt:\\n{solution}\\n\\n"
+        "Environment feedback:\\n{feedback}\\n\\n"
+        "Use the feedback to produce a corrected solution."
+    ),
 ) -> str:
-    """Prepare a tiny dataset split for a Modal smoke test."""
+    """Prepare feedback-conditioned, Verl-compatible parquet data for SDPO-style training."""
     data_dir = _dataset_dir(dataset)
-
-    if hf_dataset:
-        script = _prepare_hf_dataset_script(
-            out_dir=data_dir,
-            hf_dataset=hf_dataset,
-            hf_config=hf_config,
-            train_split=train_split,
-            val_split=val_split,
-            prompt_column=prompt_column,
-            answer_column=answer_column,
-            data_source=data_source or hf_dataset,
-            ability=ability,
-            instruction_suffix=instruction_suffix,
-            train_rows=train_rows,
-            val_rows=val_rows,
-        )
-        _run([sys.executable, "-c", script], env=_base_env())
-        cache_volume.commit()
-        train_path, val_path = _dataset_paths(dataset)
-        return f"{train_path} and {val_path}"
-
-    if dataset != "gsm8k":
-        raise ValueError(
-            "Only dataset='gsm8k' has built-in preprocessing without --hf-dataset. "
-            "For other datasets, either pass --hf-dataset with prompt/answer "
-            "columns or pass --skip-prepare --train-files <path> --val-files <path>."
-        )
-
-    full_dir = CACHE_DIR / "data" / "gsm8k_full"
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    if not (full_dir / "train.parquet").exists() or not (full_dir / "test.parquet").exists():
-        _run(
-            [
-                sys.executable,
-                "examples/data_preprocess/gsm8k.py",
-                "--local_save_dir",
-                str(full_dir),
-            ],
-            env=_base_env(),
-        )
-
-    subset_script = f"""
-import pathlib
-import pandas as pd
-
-full_dir = pathlib.Path({str(full_dir)!r})
-out_dir = pathlib.Path({str(data_dir)!r})
-out_dir.mkdir(parents=True, exist_ok=True)
-
-train = pd.read_parquet(full_dir / "train.parquet").head({int(train_rows)})
-test = pd.read_parquet(full_dir / "test.parquet").head({int(val_rows)})
-train.to_parquet(out_dir / "train.parquet")
-test.to_parquet(out_dir / "test.parquet")
-print("prepared", len(train), "train rows and", len(test), "val rows")
-"""
-    _run([sys.executable, "-c", subset_script], env=_base_env())
+    script = _prepare_sdpo_dataset_script(
+        out_dir=data_dir,
+        hf_dataset=hf_dataset,
+        hf_config=hf_config,
+        train_split=train_split,
+        val_split=val_split,
+        prompt_column=prompt_column,
+        answer_column=answer_column,
+        feedback_column=feedback_column,
+        previous_attempt_column=previous_attempt_column,
+        data_source=data_source,
+        ability=ability,
+        train_rows=train_rows,
+        val_rows=val_rows,
+        instruction_suffix=instruction_suffix,
+        static_feedback=static_feedback,
+        reprompt_template=reprompt_template,
+    )
+    _run([sys.executable, "-c", script], env=_base_env())
     cache_volume.commit()
     train_path, val_path = _dataset_paths(dataset)
     return f"{train_path} and {val_path}"
@@ -259,34 +318,37 @@ print("prepared", len(train), "train rows and", len(test), "val rows")
     startup_timeout=1800,
     ephemeral_disk=600_000,
 )
-def train_opd(
-    student_model: str = "Qwen/Qwen3.5-0.8B",
-    teacher_model: str = "Qwen/Qwen3.5-4B",
-    dataset: str = "gsm8k",
+def train_sdpo(
+    model: str = "Qwen/Qwen3.5-0.8B",
+    self_teacher_model: str | None = None,
+    dataset: str = "gsm8k_sdpo",
     train_files: str | None = None,
     val_files: str | None = None,
     teacher_key: str = "openai/gsm8k",
     total_training_steps: int = 1,
     train_batch_size: int = 2,
     ppo_mini_batch_size: int = 2,
-    max_prompt_length: int = 256,
+    max_prompt_length: int = 512,
     max_response_length: int = 128,
+    distillation_topk: int = 32,
+    distillation_loss_coef: float = 1.0,
 ) -> str:
-    """Launch a tiny Verl on-policy distillation run using k1 loss."""
+    """Run SDPO-style training by composing Verl GRPO, custom rewards, and OPD."""
     default_train_path, default_val_path = _dataset_paths(dataset)
     train_path = pathlib.Path(train_files) if train_files else default_train_path
     val_path = pathlib.Path(val_files) if val_files else default_val_path
+    teacher_model = self_teacher_model or model
 
     if not train_path.exists() or not val_path.exists():
         raise RuntimeError(
-            "Missing train/validation parquet files. Run prepare_dataset first for "
-            "built-in datasets, or pass --skip-prepare --train-files <path> "
-            "--val-files <path> for already prepared Verl-compatible data."
+            "Missing train/validation parquet files. Run prepare_sdpo_dataset first, "
+            "or pass --skip-prepare --train-files <path> --val-files <path>."
         )
 
+    reward_path = _write_reward_module()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_name = f"{_safe_name(dataset)}-opd-k1-{stamp}"
+    run_name = f"{_safe_name(dataset)}-sdpo-{stamp}"
     log_path = LOG_DIR / f"{run_name}.log"
     max_num_tokens = max_prompt_length + max_response_length + 1
     ppo_max_token_len_per_gpu = max_num_tokens * max(train_batch_size, 1)
@@ -294,14 +356,16 @@ def train_opd(
     env = _base_env()
     env["VERL_LOGGING_LEVEL"] = "INFO"
 
-    print("Smoke run configuration:", flush=True)
+    print("SDPO bridge configuration:", flush=True)
+    print("  mode=feedback-conditioned self-teacher via Verl OPD", flush=True)
+    print(f"  model={model}", flush=True)
+    print(f"  self_teacher_model={teacher_model}", flush=True)
     print(f"  dataset={dataset}", flush=True)
     print(f"  train_files={train_path}", flush=True)
     print(f"  val_files={val_path}", flush=True)
-    print(f"  student_model={student_model}", flush=True)
-    print(f"  teacher_model={teacher_model}", flush=True)
     print("  distillation_loss.loss_mode=k1", flush=True)
-    print("  distillation_loss.use_policy_gradient=True", flush=True)
+    print("  distillation_loss.use_task_rewards=True", flush=True)
+    print(f"  reward_path={reward_path}", flush=True)
     print(f"  log_path={log_path}", flush=True)
 
     _run(
@@ -330,7 +394,7 @@ def train_opd(
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         "data.shuffle=False",
-        f"actor_rollout_ref.model.path={student_model}",
+        f"actor_rollout_ref.model.path={model}",
         "actor_rollout_ref.model.trust_remote_code=True",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",
@@ -348,9 +412,11 @@ def train_opd(
         f"actor_rollout_ref.rollout.max_model_len={max_num_tokens}",
         "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
         f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
+        "reward.custom_reward_function.name=compute_score",
+        f"reward.custom_reward_function.path={reward_path}",
         "trainer.balance_batch=False",
         "trainer.logger=console",
-        "trainer.project_name=continuum_verl_opd",
+        "trainer.project_name=continuum_verl_sdpo",
         f"trainer.experiment_name={run_name}",
         "trainer.n_gpus_per_node=1",
         "trainer.nnodes=1",
@@ -363,6 +429,7 @@ def train_opd(
         "distillation.enabled=True",
         "distillation.n_gpus_per_node=1",
         "distillation.nnodes=1",
+        "distillation.teacher_key=data_source",
         f"distillation.teacher_models.teacher_model.key={teacher_key}",
         f"distillation.teacher_models.teacher_model.model_path={teacher_model}",
         "distillation.teacher_models.teacher_model.num_replicas=1",
@@ -371,15 +438,16 @@ def train_opd(
         "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.45",
         f"distillation.teacher_models.teacher_model.inference.max_model_len={max_num_tokens}",
         "distillation.distillation_loss.loss_mode=k1",
-        "distillation.distillation_loss.topk=32",
-        "distillation.distillation_loss.use_task_rewards=False",
+        f"distillation.distillation_loss.topk={distillation_topk}",
+        "distillation.distillation_loss.use_task_rewards=True",
         "distillation.distillation_loss.use_policy_gradient=True",
+        f"distillation.distillation_loss.distillation_loss_coef={distillation_loss_coef}",
         "distillation.distillation_loss.loss_max_clamp=10.0",
         "distillation.distillation_loss.log_prob_min_clamp=-10.0",
     ]
 
     cmd = (
-        f"set -euo pipefail; "
+        "set -euo pipefail; "
         f"{shlex.quote(sys.executable)} -m verl.trainer.main_ppo "
         f"{' '.join(shlex.quote(arg) for arg in args)} 2>&1 | tee {shlex.quote(str(log_path))}"
     )
@@ -390,46 +458,52 @@ def train_opd(
 
 @app.local_entrypoint()
 def main(
-    student_model: str = "Qwen/Qwen3.5-0.8B",
-    teacher_model: str = "Qwen/Qwen3.5-4B",
-    dataset: str = "gsm8k",
+    model: str = "Qwen/Qwen3.5-0.8B",
+    self_teacher_model: str | None = None,
+    dataset: str = "gsm8k_sdpo",
     train_files: str | None = None,
     val_files: str | None = None,
     teacher_key: str = "openai/gsm8k",
-    hf_dataset: str | None = None,
-    hf_config: str | None = None,
+    hf_dataset: str = "openai/gsm8k",
+    hf_config: str | None = "main",
     train_split: str = "train",
     val_split: str = "test",
     prompt_column: str = "question",
     answer_column: str = "answer",
-    data_source: str | None = None,
-    ability: str = "general",
-    instruction_suffix: str = "",
+    feedback_column: str | None = None,
+    previous_attempt_column: str | None = None,
+    data_source: str = "openai/gsm8k",
+    ability: str = "math",
     train_rows: int = 8,
     val_rows: int = 4,
+    instruction_suffix: str = 'Let us think step by step and output the final answer after "####".',
+    static_feedback: str = "",
     total_training_steps: int = 1,
     skip_prepare: bool = False,
 ) -> None:
     print(f"Modal app: {APP_NAME}")
     if not skip_prepare:
-        prepared = prepare_dataset.remote(
+        prepared = prepare_sdpo_dataset.remote(
             dataset=dataset,
-            train_rows=train_rows,
-            val_rows=val_rows,
             hf_dataset=hf_dataset,
             hf_config=hf_config,
             train_split=train_split,
             val_split=val_split,
             prompt_column=prompt_column,
             answer_column=answer_column,
+            feedback_column=feedback_column,
+            previous_attempt_column=previous_attempt_column,
             data_source=data_source,
             ability=ability,
+            train_rows=train_rows,
+            val_rows=val_rows,
             instruction_suffix=instruction_suffix,
+            static_feedback=static_feedback,
         )
         print(f"Prepared data: {prepared}")
-    log_path = train_opd.remote(
-        student_model=student_model,
-        teacher_model=teacher_model,
+    log_path = train_sdpo.remote(
+        model=model,
+        self_teacher_model=self_teacher_model,
         dataset=dataset,
         train_files=train_files,
         val_files=val_files,
