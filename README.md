@@ -21,6 +21,9 @@ Verl, Slime, and Training Gym without modifying those framework repos.
   Modal + Verl OPD smoke tests.
 - [docs/sdpo-learnings.md](docs/sdpo-learnings.md): practical notes from the
   Modal + Verl SDPO bridge smoke tests.
+- [docs/scaling-sdpo-replication.md](docs/scaling-sdpo-replication.md): the
+  current smoke gate and run ladder for replicating Trajectory's Scaling SDPO
+  recipe.
 - [docs/kimi-k26-sdpo-modal.md](docs/kimi-k26-sdpo-modal.md): Kimi K2.6 SDPO
   sizing and topology notes for Modal H200/B200 runs.
 - [docs/kimi-k26-gpu-layout.html](docs/kimi-k26-gpu-layout.html): a
@@ -78,8 +81,8 @@ behavior, reducing regression while the model absorbs new skills.
 
 ## Modal + Verl Smoke Run
 
-The current smoke launcher uses a local copy of Verl mounted into a Modal image
-and runs one tiny Qwen3.5 OPD job on GSM8K. By default it looks for a sibling
+The OPD smoke launcher uses a local copy of Verl mounted into a Modal image and
+runs one tiny Qwen3.5 OPD job on GSM8K. By default it looks for a sibling
 `../verl` checkout; set `VERL_LOCAL_DIR` if your Verl repo lives elsewhere.
 
 ```bash
@@ -143,7 +146,13 @@ python3 -m modal app logs <app-id> --tail 500
 The SDPO launcher composes upstream Verl features rather than patching Verl's
 actor loss. It prepares feedback-conditioned prompts, uses a custom verifier
 reward, and runs on-policy distillation with a frozen self-teacher. By default,
-the self-teacher is the same base model as the student.
+the self-teacher is the same base model as the student. It now defaults to the
+ModelScope CUDA 12.9 fallback image from the AutoAgentTrain runbook.
+
+The SDPO launcher prefetches models into `/cache/models/hf/<safe-name>` by
+default and passes that local path to Verl, vLLM, and the self-teacher. Use
+`--skip-model-prefetch` only when intentionally testing raw model resolver
+behavior.
 
 ```bash
 python3 -m modal run --detach scripts/modal_verl_sdpo.py \
@@ -151,6 +160,29 @@ python3 -m modal run --detach scripts/modal_verl_sdpo.py \
   --val-rows 1 \
   --total-training-steps 1
 ```
+
+For the smallest SDPO smoke, keep the run attached. The default clones public
+Verl from `VERL_GIT_REF` into `/opt/verl` inside the ModelScope image and skips
+uploading the local Verl checkout:
+
+```bash
+VERL_GIT_REF=v0.8.0 \
+python3 -m modal run scripts/modal_verl_sdpo.py \
+  --train-rows 2 \
+  --val-rows 1 \
+  --max-num-seqs 8 \
+  --max-num-batched-tokens 2048 \
+  --total-training-steps 1
+```
+
+Download the committed log and classify it before launching anything longer:
+
+```bash
+python3 scripts/inspect_sdpo_log.py /path/to/sdpo.log --expect-steps 1
+```
+
+The one-step gate is: training metrics or `global_step_1` must appear, and a
+checkpoint should exist when `--save-hf-checkpoint` is enabled.
 
 For rich-feedback datasets, map the feedback and previous-attempt columns into
 the reprompted training examples:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -11,7 +12,17 @@ import modal
 
 
 APP_NAME = "continuum-verl-sdpo"
-VERL_IMAGE_TAG = os.environ.get("VERL_IMAGE_TAG", "verlai/verl:vllm020.dev1")
+DEFAULT_VERL_IMAGE_TAG = (
+    "modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:"
+    "ubuntu22.04-cuda12.9.1-py312-torch2.10.0-vllm0.19.1-modelscope1.35.4-swift4.1.3"
+)
+VERL_IMAGE_TAG = os.environ.get("VERL_IMAGE_TAG", DEFAULT_VERL_IMAGE_TAG)
+VERL_UPLOAD_LOCAL = os.environ.get("VERL_UPLOAD_LOCAL", "0").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+VERL_GIT_REF = os.environ.get("VERL_GIT_REF", "v0.8.0")
 THIS_FILE = pathlib.Path(__file__).resolve()
 DEFAULT_VERL_LOCAL_DIR = THIS_FILE.parents[2] / "verl" if len(THIS_FILE.parents) > 2 else pathlib.Path("/opt/verl")
 VERL_LOCAL_DIR = pathlib.Path(
@@ -20,34 +31,51 @@ VERL_LOCAL_DIR = pathlib.Path(
 REMOTE_VERL_DIR = "/opt/verl"
 CACHE_DIR = pathlib.Path("/cache")
 DATA_ROOT = CACHE_DIR / "data"
+MODEL_ROOT = CACHE_DIR / "models" / "hf"
 RUNTIME_DIR = CACHE_DIR / "runtime"
 LOG_DIR = CACHE_DIR / "logs"
 
 app = modal.App(APP_NAME)
 cache_volume = modal.Volume.from_name("continuum-verl-sdpo-cache", create_if_missing=True)
 
+image = modal.Image.from_registry(VERL_IMAGE_TAG)
+
+if VERL_UPLOAD_LOCAL:
+    image = (
+        image.add_local_dir(
+            VERL_LOCAL_DIR,
+            remote_path=REMOTE_VERL_DIR,
+            copy=True,
+            ignore=[
+                ".git",
+                ".venv",
+                "__pycache__",
+                ".pytest_cache",
+                "wandb",
+                "checkpoints",
+                "outputs",
+                "logs",
+            ],
+        )
+        .run_commands(
+            f"cd {REMOTE_VERL_DIR} && python -m pip install -r requirements.txt && python -m pip install --no-deps -e .",
+        )
+    )
+else:
+    image = image.run_commands(
+        "git --version || (apt-get update && apt-get install -y git)",
+        (
+            f"rm -rf {REMOTE_VERL_DIR} && "
+            f"git clone --depth 1 --branch {shlex.quote(VERL_GIT_REF)} "
+            f"https://github.com/verl-project/verl {REMOTE_VERL_DIR} && "
+            f"cd {REMOTE_VERL_DIR} && python -m pip install -r requirements.txt && python -m pip install --no-deps -e ."
+        ),
+    )
+
 image = (
-    modal.Image.from_registry(VERL_IMAGE_TAG)
-    .add_local_dir(
-        VERL_LOCAL_DIR,
-        remote_path=REMOTE_VERL_DIR,
-        copy=True,
-        ignore=[
-            ".git",
-            ".venv",
-            "__pycache__",
-            ".pytest_cache",
-            "wandb",
-            "checkpoints",
-            "outputs",
-            "logs",
-        ],
-    )
-    .run_commands(
-        f"cd {REMOTE_VERL_DIR} && python -m pip install --no-deps -e .",
-    )
-    .pip_install(
+    image.pip_install(
         "hf-transfer",
+        "huggingface_hub>=0.36.0",
         "pydantic>=2.12,<3",
         "fastapi[standard]>=0.115.0",
         "aiohttp>=3.13.3",
@@ -109,7 +137,6 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, **_)
         "extracted_answer": extracted,
         "feedback_raw": feedback,
         "sdpo_feedback_available": bool(feedback),
-        "data_source": data_source,
     }
 '''
 
@@ -149,6 +176,14 @@ def _dataset_paths(dataset: str) -> tuple[pathlib.Path, pathlib.Path]:
     return data_dir / "train.parquet", data_dir / "test.parquet"
 
 
+def _is_local_model_path(value: str) -> bool:
+    return value.startswith("/") or value.startswith("file:")
+
+
+def _model_cache_path(model: str) -> pathlib.Path:
+    return MODEL_ROOT / _safe_name(model)
+
+
 def _write_reward_module() -> pathlib.Path:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     reward_path = RUNTIME_DIR / "sdpo_reward.py"
@@ -178,6 +213,8 @@ def _prepare_sdpo_dataset_script(
     return f"""
 import pathlib
 import datasets
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 out_dir = pathlib.Path({str(out_dir)!r})
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -223,35 +260,37 @@ def make_prompt(base_prompt, previous_attempt, feedback):
         )
     return base_prompt
 
-def make_map_fn(split_name):
-    def process_fn(example, idx):
-        prompt_raw = read_column(example, prompt_column)
-        answer_raw = read_column(example, answer_column)
-        feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
-        previous_attempt = read_column(example, previous_attempt_column)
-        prompt = make_prompt(prompt_raw, previous_attempt, feedback_raw)
-        return {{
-            "data_source": {data_source!r},
-            "prompt": [{{"role": "user", "content": prompt}}],
-            "ability": {ability!r},
-            "reward_model": {{"style": "rule", "ground_truth": answer_raw}},
-            "extra_info": {{
-                "split": split_name,
-                "index": idx,
-                "original_prompt": prompt_raw,
-                "answer": answer_raw,
-                "feedback_raw": feedback_raw,
-                "previous_attempt": previous_attempt,
-                "sdpo_bridge": True,
-            }},
-        }}
-    return process_fn
+def make_record(example, idx, split_name):
+    prompt_raw = read_column(example, prompt_column)
+    answer_raw = read_column(example, answer_column)
+    feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
+    previous_attempt = read_column(example, previous_attempt_column)
+    prompt = make_prompt(prompt_raw, previous_attempt, feedback_raw)
+    return {{
+        "data_source": {data_source!r},
+        "prompt": [{{"role": "user", "content": prompt}}],
+        "ability": {ability!r},
+        "reward_model": {{"style": "rule", "ground_truth": answer_raw}},
+        "extra_info": {{
+            "split": split_name,
+            "index": idx,
+            "original_prompt": prompt_raw,
+            "answer": answer_raw,
+            "feedback_raw": feedback_raw,
+            "previous_attempt": previous_attempt,
+            "sdpo_bridge": True,
+        }},
+    }}
 
-train = train.map(function=make_map_fn("train"), with_indices=True)
-val = val.map(function=make_map_fn("test"), with_indices=True)
-train.to_parquet(out_dir / "train.parquet")
-val.to_parquet(out_dir / "test.parquet")
-print("prepared", len(train), "train rows and", len(val), "val rows from", hf_dataset)
+def write_plain_parquet(split, split_name, path):
+    records = [make_record(example, idx, split_name) for idx, example in enumerate(split)]
+    table = pa.Table.from_pylist(records)
+    pq.write_table(table, path)
+    return len(records)
+
+train_count = write_plain_parquet(train, "train", out_dir / "train.parquet")
+val_count = write_plain_parquet(val, "test", out_dir / "test.parquet")
+print("prepared", train_count, "train rows and", val_count, "val rows from", hf_dataset)
 """
 
 
@@ -312,6 +351,148 @@ def prepare_sdpo_dataset(
 
 @app.function(
     image=image,
+    volumes={"/cache": cache_volume},
+    timeout=3600,
+    startup_timeout=1800,
+)
+def download_model(model: str, force: bool = False) -> str:
+    """Download a HF model once into the Modal volume and return the local path."""
+    if _is_local_model_path(model):
+        return model
+
+    from huggingface_hub import snapshot_download
+
+    target_dir = _model_cache_path(model)
+    marker = target_dir / ".snapshot_complete"
+    if marker.exists() and not force:
+        print(f"Reusing cached model {model}: {target_dir}", flush=True)
+        return str(target_dir)
+
+    if force and target_dir.exists():
+        print(f"Refreshing cached model {model}: {target_dir}", flush=True)
+        shutil.rmtree(target_dir)
+    else:
+        print(f"Downloading model {model}: {target_dir}", flush=True)
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=model,
+        local_dir=str(target_dir),
+        local_dir_use_symlinks=False,
+        resume_download=not force,
+    )
+    marker.write_text(datetime.now(timezone.utc).isoformat())
+    cache_volume.commit()
+    print(f"Model ready: {target_dir}", flush=True)
+    return str(target_dir)
+
+
+def _build_verl_args(
+    *,
+    model: str,
+    teacher_model: str,
+    teacher_key: str,
+    train_path: pathlib.Path,
+    val_path: pathlib.Path,
+    reward_path: pathlib.Path,
+    run_name: str,
+    total_training_steps: int,
+    train_batch_size: int,
+    ppo_mini_batch_size: int,
+    max_prompt_length: int,
+    max_response_length: int,
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
+    ppo_clip_ratio: float,
+    distillation_clip_ratio: float,
+    distillation_topk: int,
+    distillation_loss_coef: float,
+    distillation_loss_max_clamp: float,
+    save_hf_checkpoint: bool,
+) -> list[str]:
+    max_num_tokens = max_prompt_length + max_response_length + 1
+    ppo_max_token_len_per_gpu = max_num_tokens * max(train_batch_size, 1)
+
+    return [
+        "algorithm.adv_estimator=grpo",
+        "algorithm.use_kl_in_reward=False",
+        f"data.train_files={train_path}",
+        f"data.val_files={val_path}",
+        f"data.train_batch_size={train_batch_size}",
+        f"data.max_prompt_length={max_prompt_length}",
+        f"data.max_response_length={max_response_length}",
+        "data.filter_overlong_prompts=True",
+        "data.truncation=error",
+        "data.shuffle=False",
+        f"actor_rollout_ref.model.path={model}",
+        "actor_rollout_ref.model.trust_remote_code=True",
+        "actor_rollout_ref.model.use_remove_padding=True",
+        "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        "actor_rollout_ref.actor.use_torch_compile=False",
+        "actor_rollout_ref.actor.optim.lr=1e-6",
+        f"actor_rollout_ref.actor.ppo_mini_batch_size={ppo_mini_batch_size}",
+        f"actor_rollout_ref.actor.clip_ratio={ppo_clip_ratio}",
+        f"actor_rollout_ref.actor.clip_ratio_low={ppo_clip_ratio}",
+        f"actor_rollout_ref.actor.clip_ratio_high={ppo_clip_ratio}",
+        "actor_rollout_ref.actor.use_dynamic_bsz=True",
+        f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
+        "actor_rollout_ref.actor.fsdp_config.param_offload=True",
+        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
+        "actor_rollout_ref.rollout.name=vllm",
+        "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
+        "actor_rollout_ref.rollout.gpu_memory_utilization=0.35",
+        "actor_rollout_ref.rollout.n=1",
+        f"actor_rollout_ref.rollout.max_model_len={max_num_tokens}",
+        f"actor_rollout_ref.rollout.max_num_seqs={max_num_seqs}",
+        f"actor_rollout_ref.rollout.max_num_batched_tokens={max_num_batched_tokens}",
+        "actor_rollout_ref.rollout.agent.num_workers=1",
+        "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
+        f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
+        "reward.custom_reward_function.name=compute_score",
+        f"reward.custom_reward_function.path={reward_path}",
+        "trainer.balance_batch=False",
+        "trainer.logger=console",
+        "trainer.project_name=continuum_verl_sdpo",
+        f"trainer.experiment_name={run_name}",
+        "trainer.n_gpus_per_node=1",
+        "trainer.nnodes=1",
+        "trainer.val_before_train=False",
+        f"trainer.save_freq={total_training_steps if save_hf_checkpoint else -1}",
+        "trainer.test_freq=-1",
+        "trainer.total_epochs=1",
+        f"trainer.total_training_steps={total_training_steps}",
+        "trainer.max_actor_ckpt_to_keep=1",
+        f"trainer.default_local_dir={CACHE_DIR / 'checkpoints' / run_name}",
+        "actor_rollout_ref.actor.checkpoint.save_contents=['model','hf_model']",
+        "actor_rollout_ref.actor.checkpoint.load_contents=['model']",
+        "distillation.enabled=True",
+        "distillation.n_gpus_per_node=1",
+        "distillation.nnodes=1",
+        "distillation.teacher_key=data_source",
+        f"distillation.teacher_models.teacher_model.key={teacher_key}",
+        f"distillation.teacher_models.teacher_model.model_path={teacher_model}",
+        "distillation.teacher_models.teacher_model.num_replicas=1",
+        "distillation.teacher_models.teacher_model.inference.name=vllm",
+        "distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1",
+        "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.45",
+        f"distillation.teacher_models.teacher_model.inference.max_model_len={max_num_tokens}",
+        f"distillation.teacher_models.teacher_model.inference.max_num_seqs={max_num_seqs}",
+        f"distillation.teacher_models.teacher_model.inference.max_num_batched_tokens={max_num_batched_tokens}",
+        "distillation.distillation_loss.loss_mode=k1",
+        f"distillation.distillation_loss.topk={distillation_topk}",
+        "distillation.distillation_loss.use_task_rewards=True",
+        "distillation.distillation_loss.use_policy_gradient=True",
+        f"distillation.distillation_loss.clip_ratio={distillation_clip_ratio}",
+        f"distillation.distillation_loss.clip_ratio_low={distillation_clip_ratio}",
+        f"distillation.distillation_loss.clip_ratio_high={distillation_clip_ratio}",
+        f"distillation.distillation_loss.distillation_loss_coef={distillation_loss_coef}",
+        f"distillation.distillation_loss.loss_max_clamp={distillation_loss_max_clamp}",
+        "distillation.distillation_loss.log_prob_min_clamp=-10.0",
+    ]
+
+
+@app.function(
+    image=image,
     gpu="H100:2",
     volumes={"/cache": cache_volume},
     timeout=7200,
@@ -330,8 +511,14 @@ def train_sdpo(
     ppo_mini_batch_size: int = 2,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
+    max_num_seqs: int = 8,
+    max_num_batched_tokens: int = 2048,
+    ppo_clip_ratio: float = 0.2,
+    distillation_clip_ratio: float = 0.2,
     distillation_topk: int = 32,
     distillation_loss_coef: float = 1.0,
+    distillation_loss_max_clamp: float = 10.0,
+    save_hf_checkpoint: bool = True,
 ) -> str:
     """Run SDPO-style training by composing Verl GRPO, custom rewards, and OPD."""
     default_train_path, default_val_path = _dataset_paths(dataset)
@@ -350,21 +537,33 @@ def train_sdpo(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_name = f"{_safe_name(dataset)}-sdpo-{stamp}"
     log_path = LOG_DIR / f"{run_name}.log"
-    max_num_tokens = max_prompt_length + max_response_length + 1
-    ppo_max_token_len_per_gpu = max_num_tokens * max(train_batch_size, 1)
+    tmp_log_path = pathlib.Path("/tmp") / f"{run_name}.log"
 
     env = _base_env()
     env["VERL_LOGGING_LEVEL"] = "INFO"
 
     print("SDPO bridge configuration:", flush=True)
     print("  mode=feedback-conditioned self-teacher via Verl OPD", flush=True)
+    print(f"  image={VERL_IMAGE_TAG}", flush=True)
+    print(f"  upload_local_verl={VERL_UPLOAD_LOCAL}", flush=True)
+    if VERL_UPLOAD_LOCAL:
+        print(f"  verl_local_dir={VERL_LOCAL_DIR}", flush=True)
+    else:
+        print(f"  verl_git_ref={VERL_GIT_REF}", flush=True)
     print(f"  model={model}", flush=True)
     print(f"  self_teacher_model={teacher_model}", flush=True)
     print(f"  dataset={dataset}", flush=True)
     print(f"  train_files={train_path}", flush=True)
     print(f"  val_files={val_path}", flush=True)
+    print(f"  total_training_steps={total_training_steps}", flush=True)
+    print(f"  max_num_seqs={max_num_seqs}", flush=True)
+    print(f"  max_num_batched_tokens={max_num_batched_tokens}", flush=True)
+    print(f"  ppo_clip_ratio={ppo_clip_ratio}", flush=True)
     print("  distillation_loss.loss_mode=k1", flush=True)
     print("  distillation_loss.use_task_rewards=True", flush=True)
+    print(f"  distillation_clip_ratio={distillation_clip_ratio}", flush=True)
+    print(f"  distillation_loss.loss_max_clamp={distillation_loss_max_clamp}", flush=True)
+    print(f"  save_hf_checkpoint={save_hf_checkpoint}", flush=True)
     print(f"  reward_path={reward_path}", flush=True)
     print(f"  log_path={log_path}", flush=True)
 
@@ -383,73 +582,40 @@ def train_sdpo(
         env=env,
     )
 
-    args = [
-        "algorithm.adv_estimator=grpo",
-        "algorithm.use_kl_in_reward=False",
-        f"data.train_files={train_path}",
-        f"data.val_files={val_path}",
-        f"data.train_batch_size={train_batch_size}",
-        f"data.max_prompt_length={max_prompt_length}",
-        f"data.max_response_length={max_response_length}",
-        "data.filter_overlong_prompts=True",
-        "data.truncation=error",
-        "data.shuffle=False",
-        f"actor_rollout_ref.model.path={model}",
-        "actor_rollout_ref.model.trust_remote_code=True",
-        "actor_rollout_ref.model.use_remove_padding=True",
-        "actor_rollout_ref.model.enable_gradient_checkpointing=True",
-        "actor_rollout_ref.actor.use_torch_compile=False",
-        "actor_rollout_ref.actor.optim.lr=1e-6",
-        f"actor_rollout_ref.actor.ppo_mini_batch_size={ppo_mini_batch_size}",
-        "actor_rollout_ref.actor.use_dynamic_bsz=True",
-        f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=True",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-        "actor_rollout_ref.rollout.name=vllm",
-        "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
-        "actor_rollout_ref.rollout.gpu_memory_utilization=0.35",
-        "actor_rollout_ref.rollout.n=1",
-        f"actor_rollout_ref.rollout.max_model_len={max_num_tokens}",
-        "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
-        f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-        "reward.custom_reward_function.name=compute_score",
-        f"reward.custom_reward_function.path={reward_path}",
-        "trainer.balance_batch=False",
-        "trainer.logger=console",
-        "trainer.project_name=continuum_verl_sdpo",
-        f"trainer.experiment_name={run_name}",
-        "trainer.n_gpus_per_node=1",
-        "trainer.nnodes=1",
-        "trainer.val_before_train=False",
-        "trainer.save_freq=-1",
-        "trainer.test_freq=-1",
-        "trainer.total_epochs=1",
-        f"trainer.total_training_steps={total_training_steps}",
-        f"trainer.default_local_dir={CACHE_DIR / 'checkpoints' / run_name}",
-        "distillation.enabled=True",
-        "distillation.n_gpus_per_node=1",
-        "distillation.nnodes=1",
-        "distillation.teacher_key=data_source",
-        f"distillation.teacher_models.teacher_model.key={teacher_key}",
-        f"distillation.teacher_models.teacher_model.model_path={teacher_model}",
-        "distillation.teacher_models.teacher_model.num_replicas=1",
-        "distillation.teacher_models.teacher_model.inference.name=vllm",
-        "distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1",
-        "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.45",
-        f"distillation.teacher_models.teacher_model.inference.max_model_len={max_num_tokens}",
-        "distillation.distillation_loss.loss_mode=k1",
-        f"distillation.distillation_loss.topk={distillation_topk}",
-        "distillation.distillation_loss.use_task_rewards=True",
-        "distillation.distillation_loss.use_policy_gradient=True",
-        f"distillation.distillation_loss.distillation_loss_coef={distillation_loss_coef}",
-        "distillation.distillation_loss.loss_max_clamp=10.0",
-        "distillation.distillation_loss.log_prob_min_clamp=-10.0",
-    ]
+    args = _build_verl_args(
+        model=model,
+        teacher_model=teacher_model,
+        teacher_key=teacher_key,
+        train_path=train_path,
+        val_path=val_path,
+        reward_path=reward_path,
+        run_name=run_name,
+        total_training_steps=total_training_steps,
+        train_batch_size=train_batch_size,
+        ppo_mini_batch_size=ppo_mini_batch_size,
+        max_prompt_length=max_prompt_length,
+        max_response_length=max_response_length,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        ppo_clip_ratio=ppo_clip_ratio,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_topk=distillation_topk,
+        distillation_loss_coef=distillation_loss_coef,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
+        save_hf_checkpoint=save_hf_checkpoint,
+    )
 
     cmd = (
         "set -euo pipefail; "
+        f"rm -f {shlex.quote(str(tmp_log_path))}; "
+        "set +e; "
         f"{shlex.quote(sys.executable)} -m verl.trainer.main_ppo "
-        f"{' '.join(shlex.quote(arg) for arg in args)} 2>&1 | tee {shlex.quote(str(log_path))}"
+        f"{' '.join(shlex.quote(arg) for arg in args)} 2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
+        "status=${PIPESTATUS[0]}; "
+        "set -e; "
+        f"cp {shlex.quote(str(tmp_log_path))} {shlex.quote(str(log_path))}; "
+        f"sync {shlex.quote(str(log_path))}; "
+        'exit "${status}"'
     )
     _run(["bash", "-lc", cmd], env=env)
     cache_volume.commit()
@@ -479,9 +645,34 @@ def main(
     instruction_suffix: str = 'Let us think step by step and output the final answer after "####".',
     static_feedback: str = "",
     total_training_steps: int = 1,
+    max_num_seqs: int = 8,
+    max_num_batched_tokens: int = 2048,
+    ppo_clip_ratio: float = 0.2,
+    distillation_clip_ratio: float = 0.2,
+    distillation_loss_max_clamp: float = 10.0,
+    save_hf_checkpoint: bool = True,
+    skip_model_prefetch: bool = False,
+    force_model_download: bool = False,
     skip_prepare: bool = False,
 ) -> None:
     print(f"Modal app: {APP_NAME}")
+    student_model_path = model
+    teacher_model_path = self_teacher_model
+    if not skip_model_prefetch:
+        student_model_path = download_model.remote(model=model, force=force_model_download)
+        print(f"Student model path: {student_model_path}")
+        if self_teacher_model:
+            if self_teacher_model == model:
+                teacher_model_path = student_model_path
+            else:
+                teacher_model_path = download_model.remote(
+                    model=self_teacher_model,
+                    force=force_model_download,
+                )
+        else:
+            teacher_model_path = student_model_path
+        print(f"Self-teacher model path: {teacher_model_path}")
+
     if not skip_prepare:
         prepared = prepare_sdpo_dataset.remote(
             dataset=dataset,
@@ -502,12 +693,18 @@ def main(
         )
         print(f"Prepared data: {prepared}")
     log_path = train_sdpo.remote(
-        model=model,
-        self_teacher_model=self_teacher_model,
+        model=student_model_path,
+        self_teacher_model=teacher_model_path,
         dataset=dataset,
         train_files=train_files,
         val_files=val_files,
         teacher_key=teacher_key,
         total_training_steps=total_training_steps,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        ppo_clip_ratio=ppo_clip_ratio,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
+        save_hf_checkpoint=save_hf_checkpoint,
     )
     print(f"Training log committed to Modal volume: {log_path}")

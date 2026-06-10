@@ -61,8 +61,28 @@ The default smoke run uses:
 - model: `Qwen/Qwen3.5-0.8B`
 - self-teacher: same model by default
 - dataset: `openai/gsm8k`, converted into `gsm8k_sdpo`
+- image:
+  `modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.9.1-py312-torch2.10.0-vllm0.19.1-modelscope1.35.4-swift4.1.3`
 - loss: `distillation.distillation_loss.loss_mode=k1`
 - reward: custom answer extractor and verifier
+
+By default the launcher starts from the ModelScope fallback image and clones
+public Verl from `VERL_GIT_REF` into `/opt/verl`. Set `VERL_UPLOAD_LOCAL=1` only
+when intentionally testing the sibling local Verl checkout. Public image probes
+showed that `verlai/verl:vllm020.dev1` does not contain an importable `verl`
+package by itself, so no-local-upload smoke tests should use the public clone
+path:
+
+```bash
+VERL_GIT_REF=v0.8.0 \
+python3 -m modal run scripts/modal_verl_sdpo.py \
+  --train-rows 2 \
+  --val-rows 1 \
+  --total-training-steps 1
+```
+
+That tests the base image plus a public Verl release without uploading the local
+`/Users/.../verl` checkout.
 
 For rich-feedback datasets, pass:
 
@@ -129,6 +149,51 @@ ap-lNwBGNx21kqYd4dypXj1Kw
 
 It had one active task after self-teacher checkpoint load.
 
+Follow-up evidence from the committed Modal volume log:
+
+```bash
+python3 -m modal volume get continuum-verl-sdpo-cache \
+  /logs/gsm8k_sdpo-sdpo-20260602T073330Z.log \
+  /tmp/gsm8k_sdpo-20260602T073330Z.log --env main
+
+python3 scripts/inspect_sdpo_log.py \
+  /tmp/gsm8k_sdpo-20260602T073330Z.log --expect-steps 1
+```
+
+The inspector reports `status=incomplete`: the log configured
+`Total training steps: 1`, loaded the self-teacher checkpoint, and then ended
+without rollout/training metrics, `global_step_1`, checkpoint saves, or a
+traceback. A read-only Modal volume check also found no `/checkpoints`
+directory. Treat this prior run as not proven to have completed one training
+step.
+
+A later read-only app inventory also found `ap-hka0FbzvRrWT3wfXePkFTp`, a
+detached `continuum-verl-sdpo` app still retrying stale pre-fix code. Its logs
+fail during import with the original `parents[2]` `IndexError`, before dataset
+prep or training. Do not count it as training evidence.
+
+The no-workspace-upload ModelScope smoke later passed the one-step gate with a
+fresh timestamped checkpoint directory:
+
+```text
+/logs/shell_sdpo_smoke_plain_20260604T075811Z.log
+/checkpoints/shell_sdpo_smoke_plain_20260604T075811Z/global_step_1
+```
+
+The downloaded log classifies as:
+
+```text
+status=completed-with-warning
+configured_steps=1
+expected_steps=1
+step_evidence=step:1 ... training/global_step:1 ...
+```
+
+The warning is a Ray DataLoader worker shutdown traceback. The process exited
+0, the `step:1` metrics line appears after the warning, and the checkpoint
+exists, so this proves the image plus public-Verl path can complete one tiny
+training step.
+
 ## Useful Config Details
 
 The bridge relies on:
@@ -175,8 +240,23 @@ self-teacher OPD plus verifier reward than rich-feedback SDPO.
 - This is not exact SDPO from the reference fork. Exact SDPO needs internal Verl
   support for `loss_mode=sdpo`, self-distillation masks, reprompted batches, and
   EMA/trust-region teacher updates.
-- The smoke had reached self-teacher checkpoint load, but a completed one-step
-  metrics line was not captured before this note was written.
+- The committed log and volume artifacts now confirm this remains incomplete:
+  no training metrics, no `global_step_1`, and no checkpoint directory were
+  present for the prior run.
+- A later attempt to rerun the attached one-step smoke was blocked before launch
+  because uploading the local ContinuumAI launcher plus sibling Verl checkout to
+  Modal was considered an external-disclosure risk. The launcher now supports
+  `VERL_UPLOAD_LOCAL=0` for a narrower public-Verl smoke path.
+- Public `modal shell --image verlai/verl:vllm020.dev1` inspection found no
+  importable `verl` package and no `/opt/verl` directory. The ModelScope
+  fallback image also lacked `verl`, and Modal shell's runtime dependency
+  injection downgraded packages such as `pydantic`, `fastapi`, and `aiohttp`.
+  Use the patched launcher image build, not raw `modal shell`, for training
+  smoke tests.
+- The successful shell smoke still prints a Ray DataLoader worker shutdown
+  traceback after the step completes. Keep classifying logs with
+  `scripts/inspect_sdpo_log.py` and watch whether that warning disappears in
+  the packaged Modal launcher.
 - The default GSM8K smoke does not include real environment feedback. It is
   useful for infrastructure validation, not for demonstrating the full benefit
   of rich-feedback SDPO.
