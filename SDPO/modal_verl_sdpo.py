@@ -34,6 +34,7 @@ DATA_ROOT = CACHE_DIR / "data"
 MODEL_ROOT = CACHE_DIR / "models" / "hf"
 RUNTIME_DIR = CACHE_DIR / "runtime"
 LOG_DIR = CACHE_DIR / "logs"
+REMOTE_SDPO_SHELL = "/opt/continuum/run_qwen_sdpo_mopd_fsdp.sh"
 
 app = modal.App(APP_NAME)
 cache_volume = modal.Volume.from_name("continuum-verl-sdpo-cache", create_if_missing=True)
@@ -82,6 +83,12 @@ image = (
         "typer>=0.20.0",
         "rich>=13.7.1",
         "importlib-metadata>=6,<8.8",
+        "tilelang",
+    )
+    .add_local_file(
+        THIS_FILE.parent / "run_qwen_sdpo_mopd_fsdp.sh",
+        remote_path=REMOTE_SDPO_SHELL,
+        copy=True,
     )
     .env(
         {
@@ -196,8 +203,12 @@ def _prepare_sdpo_dataset_script(
     out_dir: pathlib.Path,
     hf_dataset: str,
     hf_config: str | None,
+    hf_train_file: str | None,
+    hf_val_file: str | None,
     train_split: str,
     val_split: str,
+    dataset_format: str,
+    conversations_column: str,
     prompt_column: str,
     answer_column: str,
     feedback_column: str | None,
@@ -212,16 +223,47 @@ def _prepare_sdpo_dataset_script(
 ) -> str:
     return f"""
 import pathlib
+import json
 import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
 
 out_dir = pathlib.Path({str(out_dir)!r})
 out_dir.mkdir(parents=True, exist_ok=True)
 
 hf_dataset = {hf_dataset!r}
 hf_config = {hf_config!r}
-loaded = datasets.load_dataset(hf_dataset, hf_config) if hf_config else datasets.load_dataset(hf_dataset)
+hf_train_file = {hf_train_file!r}
+hf_val_file = {hf_val_file!r}
+data_files = {{}}
+if hf_train_file:
+    data_files["train"] = hf_train_file
+if hf_val_file:
+    data_files["test"] = hf_val_file
+dataset_format = {dataset_format!r}
+if data_files and dataset_format == "sharegpt":
+    def load_raw_json(repo_id, filename):
+        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
+        with open(path, "r", encoding="utf-8") as handle:
+            if filename.endswith(".jsonl"):
+                return [json.loads(line) for line in handle if line.strip()]
+            loaded_json = json.load(handle)
+        if isinstance(loaded_json, list):
+            return loaded_json
+        if isinstance(loaded_json, dict):
+            for value in loaded_json.values():
+                if isinstance(value, list):
+                    return value
+        raise ValueError(f"Unsupported raw JSON dataset shape in {{filename}}")
+    loaded = {{
+        "train": load_raw_json(hf_dataset, hf_train_file),
+        "test": load_raw_json(hf_dataset, hf_val_file or hf_train_file),
+    }}
+elif data_files:
+    loaded = datasets.load_dataset(hf_dataset, hf_config, data_files=data_files) if hf_config else datasets.load_dataset(hf_dataset, data_files=data_files)
+else:
+    loaded = datasets.load_dataset(hf_dataset, hf_config) if hf_config else datasets.load_dataset(hf_dataset)
 train = loaded[{train_split!r}]
 val = loaded[{val_split!r}]
 
@@ -229,7 +271,9 @@ def limit_rows(split, rows):
     rows = int(rows)
     if rows <= 0:
         return split
-    return split.select(range(min(rows, len(split))))
+    if hasattr(split, "select"):
+        return split.select(range(min(rows, len(split))))
+    return split[: min(rows, len(split))]
 
 train = limit_rows(train, {int(train_rows)})
 val = limit_rows(val, {int(val_rows)})
@@ -238,6 +282,7 @@ prompt_column = {prompt_column!r}
 answer_column = {answer_column!r}
 feedback_column = {feedback_column!r}
 previous_attempt_column = {previous_attempt_column!r}
+conversations_column = {conversations_column!r}
 instruction_suffix = {instruction_suffix!r}
 static_feedback = {static_feedback!r}
 reprompt_template = {reprompt_template!r}
@@ -260,11 +305,47 @@ def make_prompt(base_prompt, previous_attempt, feedback):
         )
     return base_prompt
 
+def normalize_turn(turn):
+    if not isinstance(turn, dict):
+        return "", str(turn)
+    role = str(turn.get("from") or turn.get("role") or turn.get("speaker") or "").lower()
+    value = turn.get("value", turn.get("content", turn.get("message", "")))
+    return role, "" if value is None else str(value)
+
+def conversation_to_fields(example):
+    turns = example.get(conversations_column) or []
+    if isinstance(turns, str):
+        return turns, turns, ""
+    normalized = [normalize_turn(turn) for turn in turns]
+    prompt_parts = []
+    answer = ""
+    for role, value in normalized:
+        if role in ("human", "user") and not prompt_parts:
+            prompt_parts.append(value)
+        if role in ("gpt", "assistant", "agent"):
+            answer = value
+    if not prompt_parts and normalized:
+        prompt_parts.append(normalized[0][1])
+    trace_lines = []
+    for role, value in normalized:
+        label = role or "turn"
+        trace_lines.append(f"{{label}}: {{value}}")
+    return "\\n\\n".join(prompt_parts), answer, "\\n".join(trace_lines)
+
 def make_record(example, idx, split_name):
-    prompt_raw = read_column(example, prompt_column)
-    answer_raw = read_column(example, answer_column)
-    feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
-    previous_attempt = read_column(example, previous_attempt_column)
+    if dataset_format == "sharegpt":
+        prompt_raw, answer_raw, trajectory = conversation_to_fields(example)
+        feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
+        if not feedback_raw:
+            feedback_raw = "Successful reference trajectory:\\n" + trajectory
+        previous_attempt = read_column(example, previous_attempt_column)
+        if not previous_attempt:
+            previous_attempt = trajectory
+    else:
+        prompt_raw = read_column(example, prompt_column)
+        answer_raw = read_column(example, answer_column)
+        feedback_raw = read_column(example, feedback_column, static_feedback) or static_feedback
+        previous_attempt = read_column(example, previous_attempt_column)
     prompt = make_prompt(prompt_raw, previous_attempt, feedback_raw)
     return {{
         "data_source": {data_source!r},
@@ -304,8 +385,12 @@ def prepare_sdpo_dataset(
     dataset: str = "gsm8k_sdpo",
     hf_dataset: str = "openai/gsm8k",
     hf_config: str | None = "main",
+    hf_train_file: str | None = None,
+    hf_val_file: str | None = None,
     train_split: str = "train",
     val_split: str = "test",
+    dataset_format: str = "qa",
+    conversations_column: str = "conversations",
     prompt_column: str = "question",
     answer_column: str = "answer",
     feedback_column: str | None = None,
@@ -329,8 +414,12 @@ def prepare_sdpo_dataset(
         out_dir=data_dir,
         hf_dataset=hf_dataset,
         hf_config=hf_config,
+        hf_train_file=hf_train_file,
+        hf_val_file=hf_val_file,
         train_split=train_split,
         val_split=val_split,
+        dataset_format=dataset_format,
+        conversations_column=conversations_column,
         prompt_column=prompt_column,
         answer_column=answer_column,
         feedback_column=feedback_column,
@@ -387,6 +476,53 @@ def download_model(model: str, force: bool = False) -> str:
     return str(target_dir)
 
 
+@app.function(
+    image=image,
+    volumes={"/cache": cache_volume},
+    timeout=12 * 60 * 60,
+    startup_timeout=1800,
+    ephemeral_disk=600_000,
+)
+def download_model_hf_cli(model: str, local_dir: str | None = None, force: bool = False) -> str:
+    """Download a HF model with the HF CLI into the Modal volume."""
+    if _is_local_model_path(model):
+        return model
+
+    target_dir = pathlib.Path(local_dir).expanduser() if local_dir else _model_cache_path(model)
+    marker = target_dir / ".hf_cli_download_complete"
+    if marker.exists() and not force:
+        print(f"Reusing HF CLI cached model {model}: {target_dir}", flush=True)
+        return str(target_dir)
+
+    if force and target_dir.exists():
+        print(f"Refreshing HF CLI cached model {model}: {target_dir}", flush=True)
+        shutil.rmtree(target_dir)
+    else:
+        print(f"Downloading model with HF CLI {model}: {target_dir}", flush=True)
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    env = _base_env()
+    env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    cli = shutil.which("hf") or shutil.which("huggingface-cli")
+    if not cli:
+        raise RuntimeError("Neither `hf` nor `huggingface-cli` is available in the image.")
+
+    cmd = [
+        cli,
+        "download",
+        model,
+        "--local-dir",
+        str(target_dir),
+    ]
+    if cli.endswith("huggingface-cli"):
+        cmd.append("--resume-download")
+    _run(cmd, cwd="/cache", env=env)
+    marker.write_text(datetime.now(timezone.utc).isoformat())
+    cache_volume.commit()
+    print(f"HF CLI model ready: {target_dir}", flush=True)
+    return str(target_dir)
+
+
 def _build_verl_args(
     *,
     model: str,
@@ -397,12 +533,23 @@ def _build_verl_args(
     reward_path: pathlib.Path,
     run_name: str,
     total_training_steps: int,
+    total_epochs: int,
     train_batch_size: int,
     ppo_mini_batch_size: int,
     max_prompt_length: int,
     max_response_length: int,
     max_num_seqs: int,
     max_num_batched_tokens: int,
+    n_gpus_per_node: int,
+    tensor_model_parallel_size: int,
+    rollout_expert_parallel_size: int,
+    distillation_n_gpus_per_node: int | None,
+    distillation_tensor_model_parallel_size: int | None,
+    distillation_expert_parallel_size: int | None,
+    rollout_gpu_memory_utilization: float,
+    distillation_gpu_memory_utilization: float,
+    enable_activation_offload: bool,
+    fsdp_model_dtype: str,
     ppo_clip_ratio: float,
     distillation_clip_ratio: float,
     distillation_topk: int,
@@ -412,6 +559,11 @@ def _build_verl_args(
 ) -> list[str]:
     max_num_tokens = max_prompt_length + max_response_length + 1
     ppo_max_token_len_per_gpu = max_num_tokens * max(train_batch_size, 1)
+    teacher_n_gpus_per_node = distillation_n_gpus_per_node or n_gpus_per_node
+    teacher_tensor_model_parallel_size = (
+        distillation_tensor_model_parallel_size or tensor_model_parallel_size
+    )
+    teacher_expert_parallel_size = distillation_expert_parallel_size or rollout_expert_parallel_size
 
     return [
         "algorithm.adv_estimator=grpo",
@@ -428,6 +580,7 @@ def _build_verl_args(
         "actor_rollout_ref.model.trust_remote_code=True",
         "actor_rollout_ref.model.use_remove_padding=True",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        f"actor_rollout_ref.model.enable_activation_offload={enable_activation_offload}",
         "actor_rollout_ref.actor.use_torch_compile=False",
         "actor_rollout_ref.actor.optim.lr=1e-6",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={ppo_mini_batch_size}",
@@ -438,9 +591,11 @@ def _build_verl_args(
         f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
         "actor_rollout_ref.actor.fsdp_config.param_offload=True",
         "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
+        f"actor_rollout_ref.actor.fsdp_config.model_dtype={fsdp_model_dtype}",
         "actor_rollout_ref.rollout.name=vllm",
-        "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
-        "actor_rollout_ref.rollout.gpu_memory_utilization=0.35",
+        f"actor_rollout_ref.rollout.tensor_model_parallel_size={tensor_model_parallel_size}",
+        f"actor_rollout_ref.rollout.expert_parallel_size={rollout_expert_parallel_size}",
+        f"actor_rollout_ref.rollout.gpu_memory_utilization={rollout_gpu_memory_utilization}",
         "actor_rollout_ref.rollout.n=1",
         f"actor_rollout_ref.rollout.max_model_len={max_num_tokens}",
         f"actor_rollout_ref.rollout.max_num_seqs={max_num_seqs}",
@@ -454,27 +609,28 @@ def _build_verl_args(
         "trainer.logger=console",
         "trainer.project_name=continuum_verl_sdpo",
         f"trainer.experiment_name={run_name}",
-        "trainer.n_gpus_per_node=1",
+        f"trainer.n_gpus_per_node={n_gpus_per_node}",
         "trainer.nnodes=1",
         "trainer.val_before_train=False",
         f"trainer.save_freq={total_training_steps if save_hf_checkpoint else -1}",
         "trainer.test_freq=-1",
-        "trainer.total_epochs=1",
+        f"trainer.total_epochs={total_epochs}",
         f"trainer.total_training_steps={total_training_steps}",
         "trainer.max_actor_ckpt_to_keep=1",
         f"trainer.default_local_dir={CACHE_DIR / 'checkpoints' / run_name}",
         "actor_rollout_ref.actor.checkpoint.save_contents=['model','hf_model']",
         "actor_rollout_ref.actor.checkpoint.load_contents=['model']",
         "distillation.enabled=True",
-        "distillation.n_gpus_per_node=1",
+        f"distillation.n_gpus_per_node={teacher_n_gpus_per_node}",
         "distillation.nnodes=1",
         "distillation.teacher_key=data_source",
         f"distillation.teacher_models.teacher_model.key={teacher_key}",
         f"distillation.teacher_models.teacher_model.model_path={teacher_model}",
         "distillation.teacher_models.teacher_model.num_replicas=1",
         "distillation.teacher_models.teacher_model.inference.name=vllm",
-        "distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1",
-        "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.45",
+        f"distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size={teacher_tensor_model_parallel_size}",
+        f"distillation.teacher_models.teacher_model.inference.expert_parallel_size={teacher_expert_parallel_size}",
+        f"distillation.teacher_models.teacher_model.inference.gpu_memory_utilization={distillation_gpu_memory_utilization}",
         f"distillation.teacher_models.teacher_model.inference.max_model_len={max_num_tokens}",
         f"distillation.teacher_models.teacher_model.inference.max_num_seqs={max_num_seqs}",
         f"distillation.teacher_models.teacher_model.inference.max_num_batched_tokens={max_num_batched_tokens}",
@@ -493,7 +649,7 @@ def _build_verl_args(
 
 @app.function(
     image=image,
-    gpu="H100:2",
+    gpu="H200:5",
     volumes={"/cache": cache_volume},
     timeout=7200,
     startup_timeout=1800,
@@ -507,12 +663,23 @@ def train_sdpo(
     val_files: str | None = None,
     teacher_key: str = "openai/gsm8k",
     total_training_steps: int = 1,
+    total_epochs: int = 1,
     train_batch_size: int = 2,
     ppo_mini_batch_size: int = 2,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
     max_num_seqs: int = 8,
     max_num_batched_tokens: int = 2048,
+    n_gpus_per_node: int = 1,
+    tensor_model_parallel_size: int = 1,
+    rollout_expert_parallel_size: int = 1,
+    distillation_n_gpus_per_node: int | None = None,
+    distillation_tensor_model_parallel_size: int | None = None,
+    distillation_expert_parallel_size: int | None = None,
+    rollout_gpu_memory_utilization: float = 0.35,
+    distillation_gpu_memory_utilization: float = 0.45,
+    enable_activation_offload: bool = False,
+    fsdp_model_dtype: str = "fp32",
     ppo_clip_ratio: float = 0.2,
     distillation_clip_ratio: float = 0.2,
     distillation_topk: int = 32,
@@ -556,8 +723,34 @@ def train_sdpo(
     print(f"  train_files={train_path}", flush=True)
     print(f"  val_files={val_path}", flush=True)
     print(f"  total_training_steps={total_training_steps}", flush=True)
+    print(f"  train_batch_size={train_batch_size}", flush=True)
+    print(f"  ppo_mini_batch_size={ppo_mini_batch_size}", flush=True)
     print(f"  max_num_seqs={max_num_seqs}", flush=True)
     print(f"  max_num_batched_tokens={max_num_batched_tokens}", flush=True)
+    print(f"  n_gpus_per_node={n_gpus_per_node}", flush=True)
+    print(f"  tensor_model_parallel_size={tensor_model_parallel_size}", flush=True)
+    print(f"  rollout_expert_parallel_size={rollout_expert_parallel_size}", flush=True)
+    print(f"  rollout_gpu_memory_utilization={rollout_gpu_memory_utilization}", flush=True)
+    print(
+        f"  distillation_n_gpus_per_node={distillation_n_gpus_per_node or n_gpus_per_node}",
+        flush=True,
+    )
+    print(
+        "  distillation_tensor_model_parallel_size="
+        f"{distillation_tensor_model_parallel_size or tensor_model_parallel_size}",
+        flush=True,
+    )
+    print(
+        "  distillation_expert_parallel_size="
+        f"{distillation_expert_parallel_size or rollout_expert_parallel_size}",
+        flush=True,
+    )
+    print(
+        f"  distillation_gpu_memory_utilization={distillation_gpu_memory_utilization}",
+        flush=True,
+    )
+    print(f"  enable_activation_offload={enable_activation_offload}", flush=True)
+    print(f"  fsdp_model_dtype={fsdp_model_dtype}", flush=True)
     print(f"  ppo_clip_ratio={ppo_clip_ratio}", flush=True)
     print("  distillation_loss.loss_mode=k1", flush=True)
     print("  distillation_loss.use_task_rewards=True", flush=True)
@@ -591,12 +784,23 @@ def train_sdpo(
         reward_path=reward_path,
         run_name=run_name,
         total_training_steps=total_training_steps,
+        total_epochs=total_epochs,
         train_batch_size=train_batch_size,
         ppo_mini_batch_size=ppo_mini_batch_size,
         max_prompt_length=max_prompt_length,
         max_response_length=max_response_length,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
+        n_gpus_per_node=n_gpus_per_node,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        rollout_expert_parallel_size=rollout_expert_parallel_size,
+        distillation_n_gpus_per_node=distillation_n_gpus_per_node,
+        distillation_tensor_model_parallel_size=distillation_tensor_model_parallel_size,
+        distillation_expert_parallel_size=distillation_expert_parallel_size,
+        rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
+        distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
+        enable_activation_offload=enable_activation_offload,
+        fsdp_model_dtype=fsdp_model_dtype,
         ppo_clip_ratio=ppo_clip_ratio,
         distillation_clip_ratio=distillation_clip_ratio,
         distillation_topk=distillation_topk,
@@ -608,13 +812,245 @@ def train_sdpo(
     cmd = (
         "set -euo pipefail; "
         f"rm -f {shlex.quote(str(tmp_log_path))}; "
+        "persist_log() { "
+        f"if [ -f {shlex.quote(str(tmp_log_path))} ]; then "
+        f"cp {shlex.quote(str(tmp_log_path))} {shlex.quote(str(log_path))}; "
+        f"sync {shlex.quote(str(log_path))}; "
+        "fi; "
+        "}; "
+        "trap persist_log EXIT; "
         "set +e; "
         f"{shlex.quote(sys.executable)} -m verl.trainer.main_ppo "
         f"{' '.join(shlex.quote(arg) for arg in args)} 2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
         "status=${PIPESTATUS[0]}; "
-        "set -e; "
+        'exit "${status}"'
+    )
+    _run(["bash", "-lc", cmd], env=env)
+    cache_volume.commit()
+    return str(log_path)
+
+
+def _build_shell_env(
+    *,
+    model: str,
+    teacher_model: str,
+    teacher_key: str,
+    train_path: pathlib.Path,
+    val_path: pathlib.Path,
+    reward_path: pathlib.Path,
+    run_name: str,
+    total_training_steps: int,
+    total_epochs: int,
+    train_batch_size: int,
+    ppo_mini_batch_size: int,
+    max_prompt_length: int,
+    max_response_length: int,
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
+    n_gpus_per_node: int,
+    tensor_model_parallel_size: int,
+    rollout_expert_parallel_size: int,
+    distillation_n_gpus_per_node: int | None,
+    distillation_tensor_model_parallel_size: int | None,
+    distillation_expert_parallel_size: int | None,
+    rollout_gpu_memory_utilization: float,
+    distillation_gpu_memory_utilization: float,
+    enable_activation_offload: bool,
+    fsdp_model_dtype: str,
+    ppo_clip_ratio: float,
+    distillation_clip_ratio: float,
+    distillation_topk: int,
+    distillation_loss_coef: float,
+    distillation_loss_max_clamp: float,
+    save_hf_checkpoint: bool,
+) -> dict[str, str]:
+    teacher_tp = distillation_tensor_model_parallel_size or 1
+    teacher_world_size = distillation_n_gpus_per_node or teacher_tp
+    save_freq = total_training_steps if save_hf_checkpoint else -1
+    return {
+        "STUDENT_MODEL": model,
+        "TEACHER_MODEL": teacher_model,
+        "TEACHER_KEY": teacher_key,
+        "TRAIN_FILE": str(train_path),
+        "VAL_FILE": str(val_path),
+        "REWARD_FN_PATH": str(reward_path),
+        "NNODES": "1",
+        "NGPUS_PER_NODE": str(n_gpus_per_node),
+        "TRAIN_SIZE_BSZ": str(train_batch_size),
+        "PPO_MINI_BATCH_SIZE": str(ppo_mini_batch_size),
+        "PPO_MICRO_BATCH_SIZE_PER_GPU": "1",
+        "LOG_PROB_MICRO_BATCH_SIZE_PER_GPU": "1",
+        "MAX_PROMPT_LENGTH": str(max_prompt_length),
+        "MAX_RESPONSE_LENGTH": str(max_response_length),
+        "MAX_NUM_BATCHED_TOKENS": str(max_num_batched_tokens),
+        "MAX_NUM_SEQS": str(max_num_seqs),
+        "FSDP_MODEL_DTYPE": fsdp_model_dtype,
+        "PARAM_OFFLOAD": "True",
+        "OPTIMIZER_OFFLOAD": "True",
+        "OPTIMIZER_OVERRIDE_CONFIG": "{foreach: False}",
+        "ENABLE_ACTIVATION_OFFLOAD": str(bool(enable_activation_offload)),
+        "USE_TORCH_COMPILE": "False",
+        "ROLLOUT_TP": str(tensor_model_parallel_size),
+        "ROLLOUT_EP": str(rollout_expert_parallel_size),
+        "ROLLOUT_GPU_MEM_UTIL": str(rollout_gpu_memory_utilization),
+        "TEACHER_NNODES": "1",
+        "TEACHER_NUM_REPLICAS": "1",
+        "TEACHER_TP": str(teacher_tp),
+        "TEACHER_EP": str(distillation_expert_parallel_size or 1),
+        "TEACHER_WORLD_SIZE": str(teacher_world_size),
+        "TEACHER_GPU_MEM_UTIL": str(distillation_gpu_memory_utilization),
+        "DISTILLATION_LOSS_MODE": "k1",
+        "DISTILLATION_TOPK": str(distillation_topk),
+        "DISTILLATION_LOSS_COEF": str(distillation_loss_coef),
+        "DISTILLATION_CLIP_RATIO": str(distillation_clip_ratio),
+        "DISTILLATION_LOSS_MAX_CLAMP": str(distillation_loss_max_clamp),
+        "USE_TASK_REWARDS": "True",
+        "USE_POLICY_GRADIENT": "True",
+        "PROJECT_NAME": "continuum_verl_sdpo",
+        "EXPERIMENT_NAME": run_name,
+        "DEFAULT_LOCAL_DIR": str(CACHE_DIR / "checkpoints" / run_name),
+        "LOGGER": "console",
+        "BALANCE_BATCH": "False",
+        "SHUFFLE": "False",
+        "SAVE_FREQ": str(save_freq),
+        "TEST_FREQ": "-1",
+        "TOTAL_EPOCHS": str(total_epochs),
+        "TOTAL_TRAINING_STEPS": str(total_training_steps),
+        "VAL_BEFORE_TRAIN": "False",
+        "TRUST_REMOTE_CODE": "True",
+    }
+
+
+@app.function(
+    image=image,
+    gpu="H200:5",
+    volumes={"/cache": cache_volume},
+    timeout=7200,
+    startup_timeout=1800,
+    ephemeral_disk=600_000,
+)
+def train_sdpo_shell(
+    model: str = "/cache/models/Qwen_Qwen3_6-35B-A3B",
+    self_teacher_model: str | None = None,
+    dataset: str = "eto_sdpo",
+    train_files: str | None = None,
+    val_files: str | None = None,
+    teacher_key: str = "agent-eto/eto-sft-trajectory",
+    total_training_steps: int = 5,
+    total_epochs: int = 1,
+    train_batch_size: int = 2,
+    ppo_mini_batch_size: int = 2,
+    max_prompt_length: int = 2048,
+    max_response_length: int = 128,
+    max_num_seqs: int = 1,
+    max_num_batched_tokens: int = 2048,
+    n_gpus_per_node: int = 4,
+    tensor_model_parallel_size: int = 4,
+    rollout_expert_parallel_size: int = 4,
+    distillation_n_gpus_per_node: int | None = 1,
+    distillation_tensor_model_parallel_size: int | None = 1,
+    distillation_expert_parallel_size: int | None = 1,
+    rollout_gpu_memory_utilization: float = 0.35,
+    distillation_gpu_memory_utilization: float = 0.9,
+    enable_activation_offload: bool = True,
+    fsdp_model_dtype: str = "bfloat16",
+    ppo_clip_ratio: float = 0.2,
+    distillation_clip_ratio: float = 0.2,
+    distillation_topk: int = 32,
+    distillation_loss_coef: float = 1.0,
+    distillation_loss_max_clamp: float = 10.0,
+    save_hf_checkpoint: bool = False,
+) -> str:
+    """Run the OPD-style SDPO shell recipe on Modal."""
+    default_train_path, default_val_path = _dataset_paths(dataset)
+    train_path = pathlib.Path(train_files) if train_files else default_train_path
+    val_path = pathlib.Path(val_files) if val_files else default_val_path
+    teacher_model = self_teacher_model or model
+
+    if not train_path.exists() or not val_path.exists():
+        raise RuntimeError(
+            "Missing train/validation parquet files. Run prepare_sdpo_dataset first, "
+            "or pass --skip-prepare --train-files <path> --val-files <path>."
+        )
+
+    reward_path = _write_reward_module()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_name = f"{_safe_name(dataset)}-sdpo-shell-{stamp}"
+    log_path = LOG_DIR / f"{run_name}.log"
+    tmp_log_path = pathlib.Path("/tmp") / f"{run_name}.log"
+
+    env = _base_env()
+    env["VERL_LOGGING_LEVEL"] = "INFO"
+    shell_env = _build_shell_env(
+        model=model,
+        teacher_model=teacher_model,
+        teacher_key=teacher_key,
+        train_path=train_path,
+        val_path=val_path,
+        reward_path=reward_path,
+        run_name=run_name,
+        total_training_steps=total_training_steps,
+        total_epochs=total_epochs,
+        train_batch_size=train_batch_size,
+        ppo_mini_batch_size=ppo_mini_batch_size,
+        max_prompt_length=max_prompt_length,
+        max_response_length=max_response_length,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        n_gpus_per_node=n_gpus_per_node,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        rollout_expert_parallel_size=rollout_expert_parallel_size,
+        distillation_n_gpus_per_node=distillation_n_gpus_per_node,
+        distillation_tensor_model_parallel_size=distillation_tensor_model_parallel_size,
+        distillation_expert_parallel_size=distillation_expert_parallel_size,
+        rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
+        distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
+        enable_activation_offload=enable_activation_offload,
+        fsdp_model_dtype=fsdp_model_dtype,
+        ppo_clip_ratio=ppo_clip_ratio,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_topk=distillation_topk,
+        distillation_loss_coef=distillation_loss_coef,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
+        save_hf_checkpoint=save_hf_checkpoint,
+    )
+    env.update(shell_env)
+
+    print("SDPO shell configuration:", flush=True)
+    for key in sorted(shell_env):
+        print(f"  {key}={env[key]}", flush=True)
+    print(f"  shell_script={REMOTE_SDPO_SHELL}", flush=True)
+    print(f"  log_path={log_path}", flush=True)
+
+    _run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import torch, transformers, vllm, verl; "
+                "print('torch', torch.__version__, 'cuda', torch.version.cuda, "
+                "'available', torch.cuda.is_available()); "
+                "print('transformers', transformers.__version__); "
+                "print('vllm', vllm.__version__)"
+            ),
+        ],
+        env=env,
+    )
+
+    cmd = (
+        "set -euo pipefail; "
+        f"rm -f {shlex.quote(str(tmp_log_path))}; "
+        "persist_log() { "
+        f"if [ -f {shlex.quote(str(tmp_log_path))} ]; then "
         f"cp {shlex.quote(str(tmp_log_path))} {shlex.quote(str(log_path))}; "
         f"sync {shlex.quote(str(log_path))}; "
+        "fi; "
+        "}; "
+        "trap persist_log EXIT; "
+        "set +e; "
+        f"bash {shlex.quote(REMOTE_SDPO_SHELL)} 2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
+        "status=${PIPESTATUS[0]}; "
         'exit "${status}"'
     )
     _run(["bash", "-lc", cmd], env=env)
@@ -632,8 +1068,12 @@ def main(
     teacher_key: str = "openai/gsm8k",
     hf_dataset: str = "openai/gsm8k",
     hf_config: str | None = "main",
+    hf_train_file: str | None = None,
+    hf_val_file: str | None = None,
     train_split: str = "train",
     val_split: str = "test",
+    dataset_format: str = "qa",
+    conversations_column: str = "conversations",
     prompt_column: str = "question",
     answer_column: str = "answer",
     feedback_column: str | None = None,
@@ -645,8 +1085,23 @@ def main(
     instruction_suffix: str = 'Let us think step by step and output the final answer after "####".',
     static_feedback: str = "",
     total_training_steps: int = 1,
+    total_epochs: int = 1,
+    train_batch_size: int = 2,
+    ppo_mini_batch_size: int = 2,
+    max_prompt_length: int = 512,
+    max_response_length: int = 128,
     max_num_seqs: int = 8,
     max_num_batched_tokens: int = 2048,
+    n_gpus_per_node: int = 1,
+    tensor_model_parallel_size: int = 1,
+    rollout_expert_parallel_size: int = 1,
+    distillation_n_gpus_per_node: int | None = None,
+    distillation_tensor_model_parallel_size: int | None = None,
+    distillation_expert_parallel_size: int | None = None,
+    rollout_gpu_memory_utilization: float = 0.35,
+    distillation_gpu_memory_utilization: float = 0.45,
+    enable_activation_offload: bool = False,
+    fsdp_model_dtype: str = "fp32",
     ppo_clip_ratio: float = 0.2,
     distillation_clip_ratio: float = 0.2,
     distillation_loss_max_clamp: float = 10.0,
@@ -654,6 +1109,7 @@ def main(
     skip_model_prefetch: bool = False,
     force_model_download: bool = False,
     skip_prepare: bool = False,
+    run_shell_script: bool = False,
 ) -> None:
     print(f"Modal app: {APP_NAME}")
     student_model_path = model
@@ -678,8 +1134,12 @@ def main(
             dataset=dataset,
             hf_dataset=hf_dataset,
             hf_config=hf_config,
+            hf_train_file=hf_train_file,
+            hf_val_file=hf_val_file,
             train_split=train_split,
             val_split=val_split,
+            dataset_format=dataset_format,
+            conversations_column=conversations_column,
             prompt_column=prompt_column,
             answer_column=answer_column,
             feedback_column=feedback_column,
@@ -692,7 +1152,8 @@ def main(
             static_feedback=static_feedback,
         )
         print(f"Prepared data: {prepared}")
-    log_path = train_sdpo.remote(
+    train_func = train_sdpo_shell if run_shell_script else train_sdpo
+    log_path = train_func.remote(
         model=student_model_path,
         self_teacher_model=teacher_model_path,
         dataset=dataset,
@@ -700,8 +1161,23 @@ def main(
         val_files=val_files,
         teacher_key=teacher_key,
         total_training_steps=total_training_steps,
+        total_epochs=total_epochs,
+        train_batch_size=train_batch_size,
+        ppo_mini_batch_size=ppo_mini_batch_size,
+        max_prompt_length=max_prompt_length,
+        max_response_length=max_response_length,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
+        n_gpus_per_node=n_gpus_per_node,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        rollout_expert_parallel_size=rollout_expert_parallel_size,
+        distillation_n_gpus_per_node=distillation_n_gpus_per_node,
+        distillation_tensor_model_parallel_size=distillation_tensor_model_parallel_size,
+        distillation_expert_parallel_size=distillation_expert_parallel_size,
+        rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
+        distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
+        enable_activation_offload=enable_activation_offload,
+        fsdp_model_dtype=fsdp_model_dtype,
         ppo_clip_ratio=ppo_clip_ratio,
         distillation_clip_ratio=distillation_clip_ratio,
         distillation_loss_max_clamp=distillation_loss_max_clamp,

@@ -103,7 +103,7 @@ the image is still building or workers have not started.
 
   ```bash
   VERL_IMAGE_TAG=verlai/verl:<compatible-amd64-tag> \
-    python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py
+    python3 -m modal run --detach OPD/modal_verl_qwen35_opd.py
   ```
 
 - Avoid ARM-only tags such as `verlai/verl:vllm020.aarch64.dev1` on normal

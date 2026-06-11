@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qwen 35B-A3B SDPO Modal Smoke</title>
+    <meta
+      name="description"
+      content="Infographic for the Qwen 35B-A3B SDPO smoke run on Modal with Verl, H200 GPUs, ETO trajectory data, and full FSDP training."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172033;
+        --muted: #5d6a7d;
+        --line: #d8e0ea;
+        --paper: #f6f7f9;
+        --panel: #ffffff;
+        --cyan: #0e7490;
+        --cyan-soft: #dff6fb;
+        --green: #2f7d32;
+        --green-soft: #e5f3df;
+        --wine: #a73455;
+        --wine-soft: #fbe6ed;
+        --gold: #a66a12;
+        --gold-soft: #fff0cf;
+        --blue: #3157b7;
+        --blue-soft: #e8edff;
+        --slate-soft: #eef2f6;
+        --shadow: 0 18px 54px rgba(23, 32, 51, 0.11);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(180deg, #ffffff 0%, var(--paper) 64%, #ffffff 100%);
+      }
+
+      code {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.92em;
+        overflow-wrap: anywhere;
+      }
+
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        min-height: 72vh;
+        display: grid;
+        align-items: center;
+        padding: 58px 0 34px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.92fr) minmax(380px, 1.08fr);
+        gap: 38px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--cyan);
+        font-size: 0.82rem;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--cyan);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 780px;
+        margin-bottom: 18px;
+        font-size: 5rem;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      .lede {
+        max-width: 700px;
+        margin-bottom: 26px;
+        color: var(--muted);
+        font-size: 1.18rem;
+        line-height: 1.62;
+      }
+
+      .tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .tag {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.78);
+        padding: 8px 12px;
+        color: #344054;
+        font-size: 0.88rem;
+        font-weight: 760;
+      }
+
+      .run-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+
+      .gpu-map {
+        display: grid;
+        grid-template-columns: 1fr 72px 0.75fr;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .gpu-block {
+        min-height: 232px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        background: var(--panel);
+      }
+
+      .gpu-block.student {
+        background: var(--cyan-soft);
+        border-color: rgba(14, 116, 144, 0.28);
+      }
+
+      .gpu-block.teacher {
+        background: var(--gold-soft);
+        border-color: rgba(166, 106, 18, 0.3);
+      }
+
+      .gpu-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+        font-weight: 850;
+      }
+
+      .gpu-chip-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .chip {
+        display: grid;
+        place-items: center;
+        min-height: 58px;
+        border: 1px solid rgba(23, 32, 51, 0.12);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.72);
+        font-weight: 850;
+      }
+
+      .teacher .gpu-chip-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        display: grid;
+        place-items: center;
+        align-self: center;
+        width: 72px;
+        min-height: 72px;
+        border-radius: 999px;
+        background: var(--blue-soft);
+        color: var(--blue);
+        font-size: 1.65rem;
+        font-weight: 900;
+      }
+
+      .note {
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.48;
+      }
+
+      section {
+        padding: 54px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 24px;
+      }
+
+      h2 {
+        margin-bottom: 8px;
+        font-size: 2.85rem;
+        line-height: 1.06;
+        letter-spacing: 0;
+      }
+
+      .section-head p {
+        max-width: 570px;
+        color: var(--muted);
+        line-height: 1.58;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .metric {
+        min-height: 164px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 18px;
+        box-shadow: 0 10px 28px rgba(23, 32, 51, 0.06);
+      }
+
+      .metric:nth-child(1) {
+        border-top: 5px solid var(--green);
+      }
+
+      .metric:nth-child(2) {
+        border-top: 5px solid var(--cyan);
+      }
+
+      .metric:nth-child(3) {
+        border-top: 5px solid var(--gold);
+      }
+
+      .metric:nth-child(4) {
+        border-top: 5px solid var(--wine);
+      }
+
+      .label {
+        display: block;
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1.34rem;
+      }
+
+      .metric p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+      }
+
+      .phase {
+        min-height: 240px;
+        padding: 20px;
+        border-right: 1px solid var(--line);
+      }
+
+      .phase:last-child {
+        border-right: 0;
+      }
+
+      .phase b {
+        display: inline-grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        margin-bottom: 18px;
+        border-radius: 999px;
+        color: #ffffff;
+        background: var(--ink);
+      }
+
+      .phase h3 {
+        min-height: 56px;
+        margin-bottom: 10px;
+        font-size: 1.05rem;
+      }
+
+      .phase p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        gap: 18px;
+      }
+
+      .panel {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 22px;
+        box-shadow: 0 10px 28px rgba(23, 32, 51, 0.06);
+      }
+
+      .panel h3 {
+        margin-bottom: 12px;
+        font-size: 1.25rem;
+      }
+
+      .list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .list li {
+        min-width: 0;
+        border-left: 5px solid var(--cyan);
+        border-radius: 8px;
+        background: var(--slate-soft);
+        padding: 11px 13px;
+        color: var(--muted);
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .list li:nth-child(2) {
+        border-left-color: var(--green);
+      }
+
+      .list li:nth-child(3) {
+        border-left-color: var(--gold);
+      }
+
+      .list li:nth-child(4) {
+        border-left-color: var(--wine);
+      }
+
+      .code-block {
+        overflow-x: auto;
+        margin: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #141a24;
+        color: #f7f9fc;
+        padding: 16px;
+        font-size: 0.86rem;
+        line-height: 1.5;
+      }
+
+      .link-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: #ffffff;
+        background: var(--ink);
+        font-weight: 820;
+        text-decoration: none;
+      }
+
+      .button:hover,
+      .button:focus {
+        background: var(--blue);
+      }
+
+      footer {
+        padding: 34px 0 50px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 940px) {
+        main {
+          width: min(100% - 24px, 720px);
+        }
+
+        .hero {
+          min-height: auto;
+          padding-top: 38px;
+        }
+
+        .hero-grid,
+        .gpu-map,
+        .section-head,
+        .split {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .arrow {
+          width: 100%;
+          min-height: 50px;
+          border-radius: 8px;
+        }
+
+        h1 {
+          font-size: 3.35rem;
+        }
+
+        h2 {
+          font-size: 2.2rem;
+        }
+
+        .metrics,
+        .pipeline {
+          grid-template-columns: 1fr;
+        }
+
+        .phase {
+          min-height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .phase:last-child {
+          border-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">Modal + Verl SDPO smoke</span>
+            <h1>Qwen 35B-A3B full-FSDP training</h1>
+            <p class="lede">
+              A five-step SDPO bridge run using the cached
+              <strong>Qwen/Qwen3.6-35B-A3B</strong> model, ETO agent trajectory
+              data, a one-GPU self-teacher, and four H200s for the student.
+              Despite the shorthand "Qwen3.5-35B-A3B" in planning notes, the
+              artifact-backed run used the Qwen3.6 35B-A3B checkpoint.
+            </p>
+            <div class="tag-row" aria-label="Run tags">
+              <span class="tag">Full FSDP, not LoRA</span>
+              <span class="tag">4x H200 student</span>
+              <span class="tag">1x H200 teacher</span>
+              <span class="tag">5 training steps</span>
+              <span class="tag">ETO trajectory data</span>
+            </div>
+          </div>
+
+          <div class="run-card" aria-label="GPU topology">
+            <div class="gpu-map">
+              <div class="gpu-block student">
+                <div class="gpu-label">
+                  <span>Student policy</span>
+                  <span>FSDP</span>
+                </div>
+                <div class="gpu-chip-grid">
+                  <div class="chip">H200 1</div>
+                  <div class="chip">H200 2</div>
+                  <div class="chip">H200 3</div>
+                  <div class="chip">H200 4</div>
+                </div>
+                <p class="note">
+                  Tensor parallel 4, expert parallel 4, bf16 model dtype, CPU
+                  parameter and optimizer offload enabled.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">+</div>
+              <div class="gpu-block teacher">
+                <div class="gpu-label">
+                  <span>Self-teacher</span>
+                  <span>vLLM</span>
+                </div>
+                <div class="gpu-chip-grid">
+                  <div class="chip">H200 5</div>
+                </div>
+                <p class="note">
+                  One forward-pass teacher with TP 1, EP 1, and 0.9 vLLM memory
+                  utilization.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Run evidence</span>
+            <h2>What actually completed</h2>
+          </div>
+          <p>
+            The Modal volume log was downloaded into this repository and
+            inspected with the local SDPO log classifier. The classifier found
+            all five configured steps and marked the run as completed with a
+            teardown warning.
+          </p>
+        </div>
+
+        <div class="metrics">
+          <div class="metric">
+            <span class="label">Status</span>
+            <strong>5 / 5 steps</strong>
+            <p>Final metric line includes <code>training/global_step:5</code>.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Token limits</span>
+            <strong>2048 + 128</strong>
+            <p>Prompt cap 2048, response cap 128, with observed prompts below cap.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Peak actor memory</span>
+            <strong>74.4 GB</strong>
+            <p>Max allocated per actor worker; reserved memory reached 87.7 GB.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Throughput</span>
+            <strong>67.8 tok/s</strong>
+            <p>Step 5 throughput after warmup; first step paid initialization cost.</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Data path</span>
+            <h2>ETO traces as Apex-style signal</h2>
+          </div>
+          <p>
+            Instead of GSM8K, the run used open agent trajectories from
+            <code>agent-eto/eto-sft-trajectory</code>. The prepared tiny smoke
+            split used WebShop-style rows for training and SciWorld-style rows
+            for validation, converted into Verl parquet with feedback-aware
+            prompt fields.
+          </p>
+        </div>
+
+        <div class="pipeline">
+          <div class="phase">
+            <b>1</b>
+            <h3>Load cached model</h3>
+            <p>
+              Download first, then train from
+              <code>/cache/models/Qwen_Qwen3_6-35B-A3B</code> on the Modal volume.
+            </p>
+          </div>
+          <div class="phase">
+            <b>2</b>
+            <h3>Prepare trajectory data</h3>
+            <p>
+              Reuse <code>/cache/data/eto_sdpo/train.parquet</code> and
+              <code>/cache/data/eto_sdpo/test.parquet</code>.
+            </p>
+          </div>
+          <div class="phase">
+            <b>3</b>
+            <h3>Sample with vLLM</h3>
+            <p>
+              Student rollout uses TP 4 and EP 4 with one generated response per
+              prompt and tight sequence limits.
+            </p>
+          </div>
+          <div class="phase">
+            <b>4</b>
+            <h3>Score with self-teacher</h3>
+            <p>
+              Teacher compute stays small: one H200, one forward pass path, and
+              the same local checkpoint as the student.
+            </p>
+          </div>
+          <div class="phase">
+            <b>5</b>
+            <h3>Update full model</h3>
+            <p>
+              Full FSDP update with AdamW, bf16, activation offload, parameter
+              offload, and optimizer offload.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Config</span>
+            <h2>The knobs that mattered</h2>
+          </div>
+          <p>
+            The successful run used the OPD-style SDPO shell wrapper so batch,
+            topology, model, teacher, and token settings are environment
+            variables rather than hard-coded Python values.
+          </p>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h3>Learning checklist</h3>
+            <ul class="list">
+              <li>
+                Two H200s were not enough for full Qwen 35B-A3B Adam/FSDP
+                training; four student H200s got the smoke through.
+              </li>
+              <li>
+                The teacher can stay at one GPU for this SDPO bridge because it
+                only supplies log-probability guidance for the sampled batch.
+              </li>
+              <li>
+                MoE rollout needed expert parallelism aligned with the student
+                topology: TP 4 and EP 4 for the four-H200 student.
+              </li>
+              <li>
+                Batch size 1 failed with the four-worker old-log-prob path; the
+                completed run used train batch size 4 and mini-batch size 4.
+              </li>
+            </ul>
+          </div>
+
+          <div class="panel">
+            <h3>Core launch settings</h3>
+            <pre class="code-block"><code>STUDENT_MODEL=/cache/models/Qwen_Qwen3_6-35B-A3B
+TEACHER_MODEL=/cache/models/Qwen_Qwen3_6-35B-A3B
+TRAIN_FILE=/cache/data/eto_sdpo/train.parquet
+VAL_FILE=/cache/data/eto_sdpo/test.parquet
+NGPUS_PER_NODE=4
+TEACHER_WORLD_SIZE=1
+ROLLOUT_TP=4
+ROLLOUT_EP=4
+TRAIN_SIZE_BSZ=4
+PPO_MINI_BATCH_SIZE=4
+MAX_PROMPT_LENGTH=2048
+MAX_RESPONSE_LENGTH=128
+TOTAL_EPOCHS=5
+TOTAL_TRAINING_STEPS=5
+PARAM_OFFLOAD=True
+OPTIMIZER_OFFLOAD=True
+ENABLE_ACTIVATION_OFFLOAD=True
+FSDP_MODEL_DTYPE=bfloat16</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Artifacts</span>
+            <h2>What to inspect next</h2>
+          </div>
+          <p>
+            The run is a smoke proof, not a quality claim. Scores stayed at zero
+            on the tiny ETO slice, responses clipped at 128 tokens, and the log
+            includes a DataLoader worker killed during teardown after step 5.
+          </p>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h3>Saved artifacts</h3>
+            <ul class="list">
+              <li>Local log: <code>logs/eto_sdpo-sdpo-shell-20260611T055738Z.log</code></li>
+              <li>Modal volume log: <code>/cache/logs/eto_sdpo-sdpo-shell-20260611T055738Z.log</code></li>
+              <li>SDPO launcher: <code>SDPO/modal_verl_sdpo.py</code></li>
+              <li>Shell wrapper: <code>SDPO/run_qwen_sdpo_mopd_fsdp.sh</code></li>
+            </ul>
+          </div>
+
+          <div class="panel">
+            <h3>Recommended next run</h3>
+            <p class="note">
+              Keep the same cached model and dataset path, raise response length
+              only after memory remains stable, and save a checkpoint once the
+              teardown warning is cleaned up or shown to be harmless across
+              repeated runs.
+            </p>
+            <div class="link-row">
+              <a class="button" href="../logs/eto_sdpo-sdpo-shell-20260611T055738Z.log">
+                Open saved log
+              </a>
+              <a class="button" href="../SDPO/run_qwen_sdpo_mopd_fsdp.sh">
+                Open SDPO shell script
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Evidence source: local log inspector run against
+        <code>logs/eto_sdpo-sdpo-shell-20260611T055738Z.log</code>. The warning
+        status reflects a post-progress DataLoader worker termination after
+        <code>training/global_step:5</code>.
+      </footer>
+    </main>
+  </body>
+</html>

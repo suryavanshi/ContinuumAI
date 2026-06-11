@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+!logs/eto_sdpo-sdpo-shell-20260611T055738Z.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

@@ -6,7 +6,7 @@ from pathlib import Path
 
 os.environ.setdefault("VERL_UPLOAD_LOCAL", "0")
 
-from scripts import modal_verl_sdpo
+from SDPO import modal_verl_sdpo
 
 
 class ModalVerlSdpoArgsTest(unittest.TestCase):
@@ -24,13 +24,20 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
             modal_verl_sdpo._model_cache_path("Qwen/Qwen3.5-0.8B"),
         )
 
+    def test_hf_cli_downloader_is_available(self) -> None:
+        self.assertTrue(hasattr(modal_verl_sdpo.download_model_hf_cli, "remote"))
+
     def test_dataset_prepare_writes_plain_parquet_without_hf_metadata(self) -> None:
         script = modal_verl_sdpo._prepare_sdpo_dataset_script(
             out_dir=Path("/cache/data/gsm8k_sdpo"),
             hf_dataset="openai/gsm8k",
             hf_config="main",
+            hf_train_file=None,
+            hf_val_file=None,
             train_split="train",
             val_split="test",
+            dataset_format="qa",
+            conversations_column="conversations",
             prompt_column="question",
             answer_column="answer",
             feedback_column=None,
@@ -49,6 +56,35 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
         self.assertNotIn(".to_parquet(", script)
         self.assertNotIn(".map(function=", script)
 
+    def test_sharegpt_prepare_uses_trajectory_as_feedback_hint(self) -> None:
+        script = modal_verl_sdpo._prepare_sdpo_dataset_script(
+            out_dir=Path("/cache/data/eto_sdpo"),
+            hf_dataset="agent-eto/eto-sft-trajectory",
+            hf_config=None,
+            hf_train_file="data/webshop_sft.json",
+            hf_val_file="data/sciworld_sft.json",
+            train_split="train",
+            val_split="test",
+            dataset_format="sharegpt",
+            conversations_column="conversations",
+            prompt_column="question",
+            answer_column="answer",
+            feedback_column=None,
+            previous_attempt_column=None,
+            data_source="agent-eto/eto-sft-trajectory",
+            ability="agent",
+            train_rows=2,
+            val_rows=1,
+            instruction_suffix="",
+            static_feedback="",
+            reprompt_template="{prompt}\n\n{feedback}",
+        )
+
+        self.assertIn('"train"] = hf_train_file', script)
+        self.assertIn('dataset_format == "sharegpt"', script)
+        self.assertIn("Successful reference trajectory:", script)
+        self.assertIn("conversation_to_fields(example)", script)
+
     def test_reward_extra_info_does_not_shadow_batch_data_source(self) -> None:
         self.assertNotIn('"data_source": data_source', modal_verl_sdpo.SDPO_REWARD_CODE)
         self.assertIn('"sdpo_feedback_available": bool(feedback)', modal_verl_sdpo.SDPO_REWARD_CODE)
@@ -63,12 +99,23 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
             "reward_path": Path("/cache/runtime/sdpo_reward.py"),
             "run_name": "gsm8k_sdpo-sdpo-test",
             "total_training_steps": 1,
+            "total_epochs": 1,
             "train_batch_size": 2,
             "ppo_mini_batch_size": 2,
             "max_prompt_length": 512,
             "max_response_length": 128,
             "max_num_seqs": 8,
             "max_num_batched_tokens": 2048,
+            "n_gpus_per_node": 1,
+            "tensor_model_parallel_size": 1,
+            "rollout_expert_parallel_size": 1,
+            "distillation_n_gpus_per_node": None,
+            "distillation_tensor_model_parallel_size": None,
+            "distillation_expert_parallel_size": None,
+            "rollout_gpu_memory_utilization": 0.35,
+            "distillation_gpu_memory_utilization": 0.45,
+            "enable_activation_offload": False,
+            "fsdp_model_dtype": "fp32",
             "ppo_clip_ratio": 0.2,
             "distillation_clip_ratio": 0.2,
             "distillation_topk": 32,
@@ -95,9 +142,73 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
 
         self.assertIn("actor_rollout_ref.rollout.max_num_seqs=8", args)
         self.assertIn("actor_rollout_ref.rollout.max_num_batched_tokens=2048", args)
+        self.assertIn("actor_rollout_ref.rollout.tensor_model_parallel_size=1", args)
+        self.assertIn("actor_rollout_ref.rollout.expert_parallel_size=1", args)
+        self.assertIn("actor_rollout_ref.rollout.gpu_memory_utilization=0.35", args)
+        self.assertIn("actor_rollout_ref.model.enable_activation_offload=False", args)
+        self.assertIn("actor_rollout_ref.actor.fsdp_config.model_dtype=fp32", args)
+        self.assertIn("trainer.n_gpus_per_node=1", args)
+        self.assertIn("trainer.total_epochs=1", args)
         self.assertIn("distillation.teacher_models.teacher_model.inference.max_num_seqs=8", args)
         self.assertIn(
             "distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=2048",
+            args,
+        )
+        self.assertIn("distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1", args)
+        self.assertIn("distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.45", args)
+
+    def test_topology_args_can_use_two_gpu_tensor_and_expert_parallel(self) -> None:
+        args = self.build_args(
+            n_gpus_per_node=2,
+            tensor_model_parallel_size=2,
+            rollout_expert_parallel_size=2,
+        )
+
+        self.assertIn("trainer.n_gpus_per_node=2", args)
+        self.assertIn("distillation.n_gpus_per_node=2", args)
+        self.assertIn("actor_rollout_ref.rollout.tensor_model_parallel_size=2", args)
+        self.assertIn("actor_rollout_ref.rollout.expert_parallel_size=2", args)
+        self.assertIn("distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=2", args)
+        self.assertIn("distillation.teacher_models.teacher_model.inference.expert_parallel_size=2", args)
+
+    def test_teacher_topology_can_be_smaller_than_actor(self) -> None:
+        args = self.build_args(
+            n_gpus_per_node=2,
+            tensor_model_parallel_size=2,
+            rollout_expert_parallel_size=2,
+            distillation_n_gpus_per_node=1,
+            distillation_tensor_model_parallel_size=1,
+            distillation_expert_parallel_size=1,
+        )
+
+        self.assertIn("trainer.n_gpus_per_node=2", args)
+        self.assertIn("distillation.n_gpus_per_node=1", args)
+        self.assertIn("actor_rollout_ref.rollout.tensor_model_parallel_size=2", args)
+        self.assertIn("actor_rollout_ref.rollout.expert_parallel_size=2", args)
+        self.assertIn("distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=1", args)
+        self.assertIn("distillation.teacher_models.teacher_model.inference.expert_parallel_size=1", args)
+
+    def test_cpu_offload_and_bfloat16_dtype_can_be_enabled(self) -> None:
+        args = self.build_args(enable_activation_offload=True, fsdp_model_dtype="bfloat16")
+
+        self.assertIn("actor_rollout_ref.model.enable_activation_offload=True", args)
+        self.assertIn("actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16", args)
+
+    def test_total_epochs_can_be_overridden(self) -> None:
+        args = self.build_args(total_epochs=5, total_training_steps=5)
+
+        self.assertIn("trainer.total_epochs=5", args)
+        self.assertIn("trainer.total_training_steps=5", args)
+
+    def test_vllm_memory_utilization_can_be_tuned_per_role(self) -> None:
+        args = self.build_args(
+            rollout_gpu_memory_utilization=0.5,
+            distillation_gpu_memory_utilization=0.9,
+        )
+
+        self.assertIn("actor_rollout_ref.rollout.gpu_memory_utilization=0.5", args)
+        self.assertIn(
+            "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.9",
             args,
         )
 

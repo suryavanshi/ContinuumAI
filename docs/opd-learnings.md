@@ -20,7 +20,7 @@ without modifying the Verl codebase. The smoke run used:
 The launcher is:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py \
+python3 -m modal run --detach OPD/modal_verl_qwen35_opd.py \
   --train-rows 2 \
   --val-rows 1 \
   --total-training-steps 1

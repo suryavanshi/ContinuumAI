@@ -31,7 +31,7 @@ that exact internal loss path.
 The new launcher is:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --total-training-steps 1
@@ -54,7 +54,7 @@ distillation through OPD, not the SDPO fork's custom `loss_mode=sdpo`.
 
 The launcher is:
 
-[scripts/modal_verl_sdpo.py](../scripts/modal_verl_sdpo.py)
+[SDPO/modal_verl_sdpo.py](../SDPO/modal_verl_sdpo.py)
 
 The default smoke run uses:
 
@@ -75,7 +75,7 @@ path:
 
 ```bash
 VERL_GIT_REF=v0.8.0 \
-python3 -m modal run scripts/modal_verl_sdpo.py \
+python3 -m modal run SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --total-training-steps 1
@@ -87,7 +87,7 @@ That tests the base image plus a public Verl release without uploading the local
 For rich-feedback datasets, pass:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_sdpo.py \
   --dataset code_feedback_smoke \
   --hf-dataset your_org/your_feedback_dataset \
   --prompt-column prompt \

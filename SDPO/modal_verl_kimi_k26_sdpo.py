@@ -29,6 +29,7 @@ CACHE_DIR = pathlib.Path("/cache")
 DATA_ROOT = CACHE_DIR / "data"
 RUNTIME_DIR = CACHE_DIR / "runtime"
 LOG_DIR = CACHE_DIR / "logs"
+REMOTE_SDPO_SHELL = "/opt/continuum/run_qwen_sdpo_mopd_fsdp.sh"
 
 app = modal.App(APP_NAME)
 cache_volume = modal.Volume.from_name("continuum-verl-kimi-k26-sdpo-cache", create_if_missing=True)
@@ -61,6 +62,11 @@ image = (
         "typer>=0.20.0",
         "rich>=13.7.1",
         "importlib-metadata>=6,<8.8",
+    )
+    .add_local_file(
+        THIS_FILE.parent / "run_qwen_sdpo_mopd_fsdp.sh",
+        remote_path=REMOTE_SDPO_SHELL,
+        copy=True,
     )
     .env(
         {
@@ -475,158 +481,106 @@ def _start_ray_for_cluster(expected_nodes: int, gpus_per_node: int) -> tuple[obj
     return info, env
 
 
-def _append_common_verl_args(
+def _build_shell_env(
     *,
-    args: list[str],
     topology: KimiTopology,
-    model: str,
-    self_teacher_model: str,
-    mcore_model_path: str | None,
+    student_model: str,
+    teacher_model: str,
+    teacher_key: str,
     train_path: pathlib.Path,
     val_path: pathlib.Path,
-    teacher_key: str,
     reward_path: pathlib.Path,
     run_name: str,
     total_training_steps: int,
-    train_batch_size: int,
+    total_epochs: int,
+    train_size_bsz: int,
     ppo_mini_batch_size: int,
+    ppo_micro_batch_size_per_gpu: int,
+    log_prob_micro_batch_size_per_gpu: int,
     max_prompt_length: int,
     max_response_length: int,
-    rollout_n: int,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
+    actor_lr: str,
+    ppo_clip_ratio: float,
+    fsdp_model_dtype: str,
+    param_offload: bool,
+    optimizer_offload: bool,
+    optimizer_override_config: str,
+    enable_activation_offload: bool,
+    use_torch_compile: bool,
+    rollout_gpu_mem_util: float,
+    teacher_num_replicas: int,
+    teacher_gpu_mem_util: float,
+    distillation_loss_mode: str,
     distillation_topk: int,
     distillation_loss_coef: float,
-    learning_rate: str,
-    all_offload: bool,
-    lora_rank: int,
-    lora_alpha: int,
-) -> None:
-    max_num_tokens = max_prompt_length + max_response_length + 1
-    ppo_max_token_len_per_gpu = max_num_tokens
-    offload_value = str(bool(all_offload))
-
-    args.extend(
-        [
-            "algorithm.adv_estimator=grpo",
-            "algorithm.use_kl_in_reward=False",
-            f"data.train_files={train_path}",
-            f"data.val_files={val_path}",
-            f"data.train_batch_size={train_batch_size}",
-            f"data.max_prompt_length={max_prompt_length}",
-            f"data.max_response_length={max_response_length}",
-            "data.filter_overlong_prompts=True",
-            "data.truncation=error",
-            "data.shuffle=False",
-            f"actor_rollout_ref.model.path={model}",
-            "actor_rollout_ref.model.trust_remote_code=True",
-            "actor_rollout_ref.model.use_remove_padding=True",
-            "actor_rollout_ref.model.use_fused_kernels=True",
-            "actor_rollout_ref.actor.use_torch_compile=False",
-            f"actor_rollout_ref.actor.optim.lr={learning_rate}",
-            f"actor_rollout_ref.actor.ppo_mini_batch_size={ppo_mini_batch_size}",
-            "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
-            "actor_rollout_ref.actor.use_dynamic_bsz=True",
-            f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-            "actor_rollout_ref.actor.use_kl_loss=True",
-            "actor_rollout_ref.actor.kl_loss_coef=0.001",
-            "actor_rollout_ref.actor.kl_loss_type=low_var_kl",
-            "actor_rollout_ref.actor.entropy_coeff=0",
-            "actor_rollout_ref.actor.megatron.use_mbridge=True",
-            "actor_rollout_ref.actor.megatron.vanilla_mbridge=False",
-            f"actor_rollout_ref.actor.megatron.tensor_model_parallel_size={topology.actor_tp}",
-            f"actor_rollout_ref.actor.megatron.pipeline_model_parallel_size={topology.actor_pp}",
-            f"actor_rollout_ref.actor.megatron.expert_model_parallel_size={topology.actor_ep}",
-            f"actor_rollout_ref.actor.megatron.expert_tensor_parallel_size={topology.actor_etp}",
-            f"actor_rollout_ref.actor.megatron.context_parallel_size={topology.actor_cp}",
-            f"actor_rollout_ref.actor.megatron.param_offload={offload_value}",
-            f"actor_rollout_ref.actor.megatron.optimizer_offload={offload_value}",
-            f"actor_rollout_ref.actor.megatron.grad_offload={offload_value}",
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True",
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform",
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full",
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1",
-            "+actor_rollout_ref.actor.megatron.override_transformer_config.sequence_parallel=True",
-            "actor_rollout_ref.rollout.name=vllm",
-            f"actor_rollout_ref.rollout.tensor_model_parallel_size={topology.rollout_tp}",
-            f"actor_rollout_ref.rollout.data_parallel_size={topology.rollout_dp}",
-            f"actor_rollout_ref.rollout.expert_parallel_size={topology.rollout_ep}",
-            "actor_rollout_ref.rollout.moe_tensor_parallel_size=1",
-            "actor_rollout_ref.rollout.gpu_memory_utilization=0.35",
-            "actor_rollout_ref.rollout.enforce_eager=True",
-            "actor_rollout_ref.rollout.enable_chunked_prefill=True",
-            "actor_rollout_ref.rollout.enable_prefix_caching=True",
-            "actor_rollout_ref.rollout.free_cache_engine=True",
-            f"actor_rollout_ref.rollout.n={rollout_n}",
-            f"actor_rollout_ref.rollout.max_model_len={max_num_tokens}",
-            f"actor_rollout_ref.rollout.max_num_batched_tokens={max_num_batched_tokens}",
-            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
-            "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
-            f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-            "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1",
-            "actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True",
-            f"actor_rollout_ref.ref.log_prob_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-            f"actor_rollout_ref.ref.megatron.tensor_model_parallel_size={topology.actor_tp}",
-            f"actor_rollout_ref.ref.megatron.pipeline_model_parallel_size={topology.actor_pp}",
-            f"actor_rollout_ref.ref.megatron.expert_model_parallel_size={topology.actor_ep}",
-            f"actor_rollout_ref.ref.megatron.expert_tensor_parallel_size={topology.actor_etp}",
-            f"actor_rollout_ref.ref.megatron.context_parallel_size={topology.actor_cp}",
-            f"actor_rollout_ref.ref.megatron.param_offload={offload_value}",
-            "actor_rollout_ref.ref.megatron.use_mbridge=True",
-            "reward.custom_reward_function.name=compute_score",
-            f"reward.custom_reward_function.path={reward_path}",
-            "trainer.balance_batch=True",
-            "trainer.logger=console",
-            "trainer.project_name=continuum_verl_kimi_k26_sdpo",
-            f"trainer.experiment_name={run_name}",
-            f"trainer.n_gpus_per_node={topology.gpus_per_node}",
-            f"trainer.nnodes={topology.cluster_nodes}",
-            "trainer.val_before_train=False",
-            "trainer.save_freq=-1",
-            "trainer.test_freq=-1",
-            "trainer.total_epochs=1",
-            f"trainer.total_training_steps={total_training_steps}",
-            f"trainer.default_local_dir={CACHE_DIR / 'checkpoints' / run_name}",
-            "ray_kwargs.ray_init.address=auto",
-            "model_engine=megatron",
-            "distillation.enabled=True",
-            f"distillation.n_gpus_per_node={topology.gpus_per_node}",
-            f"distillation.nnodes={topology.cluster_nodes}",
-            "distillation.teacher_key=data_source",
-            f"distillation.teacher_models.teacher_model.key={teacher_key}",
-            f"distillation.teacher_models.teacher_model.model_path={self_teacher_model}",
-            "distillation.teacher_models.teacher_model.num_replicas=1",
-            "distillation.teacher_models.teacher_model.inference.name=vllm",
-            f"distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size={topology.teacher_tp}",
-            "distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.30",
-            f"distillation.teacher_models.teacher_model.inference.max_model_len={max_num_tokens}",
-            "distillation.distillation_loss.loss_mode=k1",
-            f"distillation.distillation_loss.topk={distillation_topk}",
-            "distillation.distillation_loss.use_task_rewards=True",
-            "distillation.distillation_loss.use_policy_gradient=True",
-            f"distillation.distillation_loss.distillation_loss_coef={distillation_loss_coef}",
-            "distillation.distillation_loss.loss_max_clamp=10.0",
-            "distillation.distillation_loss.log_prob_min_clamp=-10.0",
-        ]
-    )
-
-    if mcore_model_path:
-        args.extend(
-            [
-                "actor_rollout_ref.actor.megatron.use_dist_checkpointing=True",
-                f"actor_rollout_ref.actor.megatron.dist_checkpointing_path={mcore_model_path}",
-                "actor_rollout_ref.ref.megatron.use_dist_checkpointing=True",
-                f"actor_rollout_ref.ref.megatron.dist_checkpointing_path={mcore_model_path}",
-            ]
-        )
-
-    if lora_rank > 0:
-        args.extend(
-            [
-                f"actor_rollout_ref.model.lora.rank={lora_rank}",
-                f"actor_rollout_ref.model.lora.alpha={lora_alpha}",
-                "actor_rollout_ref.model.lora.lora_A_init_method=kaiming",
-            ]
-        )
+    distillation_clip_ratio: float,
+    distillation_loss_max_clamp: float,
+    use_task_rewards: bool,
+    use_policy_gradient: bool,
+    balance_batch: bool,
+    shuffle: bool,
+    save_freq: int,
+    test_freq: int,
+    val_before_train: bool,
+    trust_remote_code: bool,
+) -> dict[str, str]:
+    teacher_world_size = teacher_num_replicas * topology.teacher_tp
+    return {
+        "STUDENT_MODEL": student_model,
+        "TEACHER_MODEL": teacher_model,
+        "TEACHER_KEY": teacher_key,
+        "TRAIN_FILE": str(train_path),
+        "VAL_FILE": str(val_path),
+        "REWARD_FN_PATH": str(reward_path),
+        "NNODES": str(topology.cluster_nodes),
+        "NGPUS_PER_NODE": str(topology.gpus_per_node),
+        "TRAIN_SIZE_BSZ": str(train_size_bsz),
+        "PPO_MINI_BATCH_SIZE": str(ppo_mini_batch_size),
+        "PPO_MICRO_BATCH_SIZE_PER_GPU": str(ppo_micro_batch_size_per_gpu),
+        "LOG_PROB_MICRO_BATCH_SIZE_PER_GPU": str(log_prob_micro_batch_size_per_gpu),
+        "MAX_PROMPT_LENGTH": str(max_prompt_length),
+        "MAX_RESPONSE_LENGTH": str(max_response_length),
+        "MAX_NUM_BATCHED_TOKENS": str(max_num_batched_tokens),
+        "MAX_NUM_SEQS": str(max_num_seqs),
+        "ACTOR_LR": actor_lr,
+        "PPO_CLIP_RATIO": str(ppo_clip_ratio),
+        "FSDP_MODEL_DTYPE": fsdp_model_dtype,
+        "PARAM_OFFLOAD": str(bool(param_offload)),
+        "OPTIMIZER_OFFLOAD": str(bool(optimizer_offload)),
+        "OPTIMIZER_OVERRIDE_CONFIG": optimizer_override_config,
+        "ENABLE_ACTIVATION_OFFLOAD": str(bool(enable_activation_offload)),
+        "USE_TORCH_COMPILE": str(bool(use_torch_compile)),
+        "ROLLOUT_TP": str(topology.rollout_tp),
+        "ROLLOUT_EP": str(topology.rollout_ep),
+        "ROLLOUT_GPU_MEM_UTIL": str(rollout_gpu_mem_util),
+        "TEACHER_NNODES": str(topology.cluster_nodes),
+        "TEACHER_NUM_REPLICAS": str(teacher_num_replicas),
+        "TEACHER_TP": str(topology.teacher_tp),
+        "TEACHER_EP": str(topology.rollout_ep),
+        "TEACHER_GPU_MEM_UTIL": str(teacher_gpu_mem_util),
+        "TEACHER_WORLD_SIZE": str(teacher_world_size),
+        "DISTILLATION_LOSS_MODE": distillation_loss_mode,
+        "DISTILLATION_TOPK": str(distillation_topk),
+        "DISTILLATION_LOSS_COEF": str(distillation_loss_coef),
+        "DISTILLATION_CLIP_RATIO": str(distillation_clip_ratio),
+        "DISTILLATION_LOSS_MAX_CLAMP": str(distillation_loss_max_clamp),
+        "USE_TASK_REWARDS": str(bool(use_task_rewards)),
+        "USE_POLICY_GRADIENT": str(bool(use_policy_gradient)),
+        "PROJECT_NAME": "continuum_verl_kimi_k26_sdpo",
+        "EXPERIMENT_NAME": run_name,
+        "DEFAULT_LOCAL_DIR": str(CACHE_DIR / "checkpoints" / run_name),
+        "LOGGER": "console",
+        "BALANCE_BATCH": str(bool(balance_batch)),
+        "SHUFFLE": str(bool(shuffle)),
+        "SAVE_FREQ": str(save_freq),
+        "TEST_FREQ": str(test_freq),
+        "TOTAL_EPOCHS": str(total_epochs),
+        "TOTAL_TRAINING_STEPS": str(total_training_steps),
+        "VAL_BEFORE_TRAIN": str(bool(val_before_train)),
+        "TRUST_REMOTE_CODE": str(bool(trust_remote_code)),
+    }
 
 
 def _train_kimi_sdpo(
@@ -639,18 +593,44 @@ def _train_kimi_sdpo(
     val_files: str | None,
     teacher_key: str,
     total_training_steps: int,
+    total_epochs: int,
     train_batch_size: int,
     ppo_mini_batch_size: int,
+    ppo_micro_batch_size_per_gpu: int,
+    log_prob_micro_batch_size_per_gpu: int,
     max_prompt_length: int,
     max_response_length: int,
     rollout_n: int,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
+    ppo_clip_ratio: float,
     distillation_topk: int,
     distillation_loss_coef: float,
+    distillation_clip_ratio: float,
+    distillation_loss_max_clamp: float,
     learning_rate: str,
-    all_offload: bool,
+    fsdp_model_dtype: str,
+    param_offload: bool,
+    optimizer_offload: bool,
+    optimizer_override_config: str,
+    enable_activation_offload: bool,
+    use_torch_compile: bool,
+    rollout_gpu_mem_util: float,
+    teacher_num_replicas: int,
+    teacher_gpu_mem_util: float,
+    use_task_rewards: bool,
+    use_policy_gradient: bool,
+    balance_batch: bool,
+    shuffle: bool,
+    save_hf_checkpoint: bool,
     mcore_model_path: str | None,
 ) -> str:
+    if mcore_model_path:
+        raise RuntimeError(
+            "mcore_model_path is not used by the FSDP shell recipe. Pass an HF "
+            "student model path via --model / STUDENT_MODEL instead."
+        )
+
     info, env = _start_ray_for_cluster(topology.cluster_nodes, topology.gpus_per_node)
     if int(info.rank) != 0:
         return "worker joined ray cluster"
@@ -671,41 +651,74 @@ def _train_kimi_sdpo(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_name = f"{_safe_name(dataset)}-{topology.name}-sdpo-{stamp}"
     log_path = LOG_DIR / f"{run_name}.log"
-
-    args: list[str] = []
-    _append_common_verl_args(
-        args=args,
+    tmp_log_path = pathlib.Path("/tmp") / f"{run_name}.log"
+    save_freq = total_training_steps if save_hf_checkpoint else -1
+    env["VERL_LOGGING_LEVEL"] = "INFO"
+    shell_env = _build_shell_env(
         topology=topology,
-        model=model,
-        self_teacher_model=teacher_model,
-        mcore_model_path=mcore_model_path,
+        student_model=model,
+        teacher_model=teacher_model,
+        teacher_key=teacher_key,
         train_path=train_path,
         val_path=val_path,
-        teacher_key=teacher_key,
         reward_path=reward_path,
         run_name=run_name,
         total_training_steps=total_training_steps,
-        train_batch_size=train_batch_size,
+        total_epochs=total_epochs,
+        train_size_bsz=train_batch_size,
         ppo_mini_batch_size=ppo_mini_batch_size,
+        ppo_micro_batch_size_per_gpu=ppo_micro_batch_size_per_gpu,
+        log_prob_micro_batch_size_per_gpu=log_prob_micro_batch_size_per_gpu,
         max_prompt_length=max_prompt_length,
         max_response_length=max_response_length,
-        rollout_n=rollout_n,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        actor_lr=learning_rate,
+        ppo_clip_ratio=ppo_clip_ratio,
+        fsdp_model_dtype=fsdp_model_dtype,
+        param_offload=param_offload,
+        optimizer_offload=optimizer_offload,
+        optimizer_override_config=optimizer_override_config,
+        enable_activation_offload=enable_activation_offload,
+        use_torch_compile=use_torch_compile,
+        rollout_gpu_mem_util=rollout_gpu_mem_util,
+        teacher_num_replicas=teacher_num_replicas,
+        teacher_gpu_mem_util=teacher_gpu_mem_util,
+        distillation_loss_mode="k1",
         distillation_topk=distillation_topk,
         distillation_loss_coef=distillation_loss_coef,
-        learning_rate=learning_rate,
-        all_offload=all_offload,
-        lora_rank=topology.lora_rank,
-        lora_alpha=topology.lora_alpha,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
+        use_task_rewards=use_task_rewards,
+        use_policy_gradient=use_policy_gradient,
+        balance_batch=balance_batch,
+        shuffle=shuffle,
+        save_freq=save_freq,
+        test_freq=-1,
+        val_before_train=False,
+        trust_remote_code=True,
     )
+    env.update(shell_env)
+
+    extra_args: list[str] = []
+    if rollout_n != 1:
+        extra_args.append(f"actor_rollout_ref.rollout.n={rollout_n}")
+    if topology.lora_rank > 0:
+        extra_args.extend(
+            [
+                f"actor_rollout_ref.model.lora.rank={topology.lora_rank}",
+                f"actor_rollout_ref.model.lora.alpha={topology.lora_alpha}",
+                "actor_rollout_ref.model.lora.lora_A_init_method=kaiming",
+            ]
+        )
 
     print("Kimi K2.6 SDPO configuration:", flush=True)
     print(f"  topology={topology}", flush=True)
-    print(f"  model={model}", flush=True)
-    print(f"  self_teacher_model={teacher_model}", flush=True)
-    print(f"  train_files={train_path}", flush=True)
-    print(f"  val_files={val_path}", flush=True)
-    print(f"  mcore_model_path={mcore_model_path}", flush=True)
+    for key in sorted(shell_env):
+        print(f"  {key}={env[key]}", flush=True)
+    if extra_args:
+        print(f"  extra_args={' '.join(extra_args)}", flush=True)
+    print(f"  shell_script={REMOTE_SDPO_SHELL}", flush=True)
     print(f"  log_path={log_path}", flush=True)
 
     _run(
@@ -725,8 +738,20 @@ def _train_kimi_sdpo(
 
     cmd = (
         "set -euo pipefail; "
-        f"{shlex.quote(sys.executable)} -m verl.trainer.main_ppo "
-        f"{' '.join(shlex.quote(arg) for arg in args)} 2>&1 | tee {shlex.quote(str(log_path))}"
+        f"rm -f {shlex.quote(str(tmp_log_path))}; "
+        "persist_log() { "
+        f"if [ -f {shlex.quote(str(tmp_log_path))} ]; then "
+        f"cp {shlex.quote(str(tmp_log_path))} {shlex.quote(str(log_path))}; "
+        f"sync {shlex.quote(str(log_path))}; "
+        "fi; "
+        "}; "
+        "trap persist_log EXIT; "
+        "set +e; "
+        f"bash {shlex.quote(REMOTE_SDPO_SHELL)} "
+        f"{' '.join(shlex.quote(arg) for arg in extra_args)} "
+        f"2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
+        "status=${PIPESTATUS[0]}; "
+        'exit "${status}"'
     )
     _run(["bash", "-lc", cmd], env=env)
     cache_volume.commit()
@@ -797,16 +822,35 @@ def main(
     instruction_suffix: str = 'Think carefully and put the final answer after "####".',
     static_feedback: str = "",
     total_training_steps: int = 1,
+    total_epochs: int = 1,
     train_batch_size: int = 8,
     ppo_mini_batch_size: int = 8,
+    ppo_micro_batch_size_per_gpu: int = 1,
+    log_prob_micro_batch_size_per_gpu: int = 1,
     max_prompt_length: int = 2048,
     max_response_length: int = 2048,
     rollout_n: int = 1,
     max_num_batched_tokens: int = 8192,
+    max_num_seqs: int = 1,
+    ppo_clip_ratio: float = 0.2,
     distillation_topk: int = 64,
     distillation_loss_coef: float = 1.0,
+    distillation_clip_ratio: float = 0.2,
+    distillation_loss_max_clamp: float = 10.0,
     learning_rate: str = "1e-6",
     all_offload: bool = True,
+    fsdp_model_dtype: str = "bfloat16",
+    optimizer_override_config: str = "",
+    enable_activation_offload: bool = True,
+    use_torch_compile: bool = False,
+    rollout_gpu_mem_util: float = 0.35,
+    teacher_num_replicas: int = 1,
+    teacher_gpu_mem_util: float = 0.9,
+    use_task_rewards: bool = True,
+    use_policy_gradient: bool = True,
+    balance_batch: bool = False,
+    shuffle: bool = False,
+    save_hf_checkpoint: bool = False,
     skip_prepare: bool = False,
 ) -> None:
     print(f"Modal app: {APP_NAME}")
@@ -840,16 +884,36 @@ def main(
         val_files=val_files,
         teacher_key=teacher_key,
         total_training_steps=total_training_steps,
+        total_epochs=total_epochs,
         train_batch_size=train_batch_size,
         ppo_mini_batch_size=ppo_mini_batch_size,
+        ppo_micro_batch_size_per_gpu=ppo_micro_batch_size_per_gpu,
+        log_prob_micro_batch_size_per_gpu=log_prob_micro_batch_size_per_gpu,
         max_prompt_length=max_prompt_length,
         max_response_length=max_response_length,
         rollout_n=rollout_n,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        ppo_clip_ratio=ppo_clip_ratio,
         distillation_topk=distillation_topk,
         distillation_loss_coef=distillation_loss_coef,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
         learning_rate=learning_rate,
-        all_offload=all_offload,
+        fsdp_model_dtype=fsdp_model_dtype,
+        param_offload=all_offload,
+        optimizer_offload=all_offload,
+        optimizer_override_config=optimizer_override_config,
+        enable_activation_offload=enable_activation_offload,
+        use_torch_compile=use_torch_compile,
+        rollout_gpu_mem_util=rollout_gpu_mem_util,
+        teacher_num_replicas=teacher_num_replicas,
+        teacher_gpu_mem_util=teacher_gpu_mem_util,
+        use_task_rewards=use_task_rewards,
+        use_policy_gradient=use_policy_gradient,
+        balance_batch=balance_batch,
+        shuffle=shuffle,
+        save_hf_checkpoint=save_hf_checkpoint,
     )
 
     if mode == "h200-full":

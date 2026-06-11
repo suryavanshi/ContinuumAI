@@ -2,7 +2,7 @@
 
 This note is a planning and launch guide for training a large MoE model such as
 `moonshotai/Kimi-K2.6` with the Modal + Verl SDPO bridge in
-[`scripts/modal_verl_kimi_k26_sdpo.py`](../scripts/modal_verl_kimi_k26_sdpo.py).
+[`SDPO/modal_verl_kimi_k26_sdpo.py`](../SDPO/modal_verl_kimi_k26_sdpo.py).
 
 The script does not modify Verl. It composes existing Verl pieces:
 
@@ -106,7 +106,7 @@ large HBM capacity, and Modal's GPU docs list H200 as a supported GPU type.
 Full Kimi K2.6 pilot:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_kimi_k26_sdpo.py \
   --mode h200-full \
   --dataset kimi_math_feedback \
   --hf-dataset your_org/your_feedback_dataset \
@@ -122,7 +122,7 @@ python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
 If using a converted Megatron/MCore checkpoint in the Modal volume:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_kimi_k26_sdpo.py \
   --mode h200-full \
   --skip-prepare \
   --train-files /cache/data/kimi_feedback/train.parquet \
@@ -145,7 +145,7 @@ B200 full-tune probe:
 
 ```bash
 VERL_IMAGE_TAG=verlai/verl:<compatible-b200-amd64-tag> \
-python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_kimi_k26_sdpo.py \
   --mode b200-full \
   --dataset kimi_math_feedback \
   --hf-dataset your_org/your_feedback_dataset \
@@ -179,7 +179,7 @@ rank-32 shared-outer LoRA sync is in tens of milliseconds rather than seconds.
 Rank-32 H200 LoRA pilot:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_kimi_k26_sdpo.py \
   --mode h200-lora \
   --dataset kimi_code_feedback \
   --hf-dataset your_org/your_feedback_dataset \

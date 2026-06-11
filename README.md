@@ -29,12 +29,14 @@ Verl, Slime, and Training Gym without modifying those framework repos.
 - [docs/kimi-k26-gpu-layout.html](docs/kimi-k26-gpu-layout.html): a
   GitHub Pages-ready infographic for Kimi K2.6 GPU and distributed training
   layouts.
-- [scripts/modal_verl_qwen35_opd.py](scripts/modal_verl_qwen35_opd.py): a Modal
+- [docs/qwen-35b-a3b-sdpo.html](docs/qwen-35b-a3b-sdpo.html): a
+  GitHub Pages-ready infographic for the Qwen 35B-A3B SDPO smoke run on Modal.
+- [OPD/modal_verl_qwen35_opd.py](OPD/modal_verl_qwen35_opd.py): a Modal
   + Verl smoke launcher for Qwen3.5 on-policy distillation with `k1` loss.
-- [scripts/modal_verl_sdpo.py](scripts/modal_verl_sdpo.py): a Modal + Verl
+- [SDPO/modal_verl_sdpo.py](SDPO/modal_verl_sdpo.py): a Modal + Verl
   SDPO bridge that uses feedback-conditioned prompts, a custom reward function,
   and Verl's existing on-policy distillation path without modifying Verl.
-- [scripts/modal_verl_kimi_k26_sdpo.py](scripts/modal_verl_kimi_k26_sdpo.py): a
+- [SDPO/modal_verl_kimi_k26_sdpo.py](SDPO/modal_verl_kimi_k26_sdpo.py): a
   larger-model SDPO bridge with Kimi K2.6 H200, B200, and H200 LoRA topologies.
 - [docs/index.html](docs/index.html): a GitHub Pages-ready infographic for
   on-policy distillation and self-distillation as continual learning.
@@ -86,7 +88,7 @@ runs one tiny Qwen3.5 OPD job on GSM8K. By default it looks for a sibling
 `../verl` checkout; set `VERL_LOCAL_DIR` if your Verl repo lives elsewhere.
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py \
+python3 -m modal run --detach OPD/modal_verl_qwen35_opd.py \
   --train-rows 2 \
   --val-rows 1 \
   --total-training-steps 1
@@ -108,7 +110,7 @@ For another simple Hugging Face dataset, provide the split and column mapping.
 The script will create Verl-compatible parquet files in the Modal volume:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py \
+python3 -m modal run --detach OPD/modal_verl_qwen35_opd.py \
   --dataset my_math_smoke \
   --hf-dataset openai/gsm8k \
   --hf-config main \
@@ -125,7 +127,7 @@ For a dataset that needs custom preprocessing, prepare Verl-compatible parquet
 files in the Modal volume and point the trainer at them:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_qwen35_opd.py \
+python3 -m modal run --detach OPD/modal_verl_qwen35_opd.py \
   --skip-prepare \
   --dataset my_dataset \
   --train-files /cache/data/my_dataset/train.parquet \
@@ -155,7 +157,7 @@ default and passes that local path to Verl, vLLM, and the self-teacher. Use
 behavior.
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --total-training-steps 1
@@ -167,7 +169,7 @@ uploading the local Verl checkout:
 
 ```bash
 VERL_GIT_REF=v0.8.0 \
-python3 -m modal run scripts/modal_verl_sdpo.py \
+python3 -m modal run SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --max-num-seqs 8 \
@@ -188,7 +190,7 @@ For rich-feedback datasets, map the feedback and previous-attempt columns into
 the reprompted training examples:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_sdpo.py \
   --dataset code_feedback_smoke \
   --hf-dataset your_org/your_feedback_dataset \
   --prompt-column prompt \
@@ -213,7 +215,7 @@ The Kimi launcher keeps large-model experiments separate from the small smoke
 scripts:
 
 ```bash
-python3 -m modal run --detach scripts/modal_verl_kimi_k26_sdpo.py \
+python3 -m modal run --detach SDPO/modal_verl_kimi_k26_sdpo.py \
   --mode h200-lora \
   --train-rows 8 \
   --val-rows 4 \

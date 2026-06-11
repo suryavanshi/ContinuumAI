@@ -91,7 +91,7 @@ The corrected one-step training launch is ready, but it still uploads the local
 `ContinuumAI` launcher code to Modal and therefore requires explicit approval:
 
 ```bash
-VERL_GIT_REF=v0.8.0 python3 -m modal run scripts/modal_verl_sdpo.py \
+VERL_GIT_REF=v0.8.0 python3 -m modal run SDPO/modal_verl_sdpo.py \
   --skip-model-prefetch \
   --skip-prepare \
   --model /cache/models/hf/Qwen_Qwen3_5-0_8B \
@@ -215,7 +215,7 @@ Local preflight before uploading a new Modal app:
 
 ```bash
 python3 -m unittest tests.test_inspect_sdpo_log tests.test_modal_verl_sdpo_args
-python3 -m py_compile scripts/modal_verl_sdpo.py scripts/inspect_sdpo_log.py
+python3 -m py_compile SDPO/modal_verl_sdpo.py scripts/inspect_sdpo_log.py
 ```
 
 The arg tests assert that the smoke config uses rollout group size 1, PPO
@@ -230,7 +230,7 @@ Modal volume paths.
 
 ```bash
 VERL_UPLOAD_LOCAL=0 VERL_GIT_REF=v0.8.0 \
-python3 -m modal run scripts/modal_verl_sdpo.py \
+python3 -m modal run SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --max-num-seqs 8 \
@@ -252,7 +252,7 @@ checkout was `main` at `v0.8.0-11-gcb821109`, so treat that as an intentional
 main-branch experiment if used.
 
 ```bash
-python3 -m modal run scripts/modal_verl_sdpo.py \
+python3 -m modal run SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --max-num-seqs 8 \
@@ -265,7 +265,7 @@ python3 -m modal run scripts/modal_verl_sdpo.py \
 ```bash
 VERL_IMAGE_TAG=modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.9.1-py312-torch2.10.0-vllm0.19.1-modelscope1.35.4-swift4.1.3 \
 VERL_UPLOAD_LOCAL=0 VERL_GIT_REF=v0.8.0 \
-python3 -m modal run scripts/modal_verl_sdpo.py \
+python3 -m modal run SDPO/modal_verl_sdpo.py \
   --train-rows 2 \
   --val-rows 1 \
   --max-num-seqs 8 \
