@@ -89,6 +89,17 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
         self.assertNotIn('"data_source": data_source', modal_verl_sdpo.SDPO_REWARD_CODE)
         self.assertIn('"sdpo_feedback_available": bool(feedback)', modal_verl_sdpo.SDPO_REWARD_CODE)
 
+    def test_harvey_reward_branch_is_opt_in_by_data_source(self) -> None:
+        self.assertIn('str(data_source or "") == "harvey/lab"', modal_verl_sdpo.SDPO_REWARD_CODE)
+        self.assertIn('"harvey_reward_hits": hits', modal_verl_sdpo.SDPO_REWARD_CODE)
+        self.assertIn('"reward_terms"', modal_verl_sdpo.SDPO_REWARD_CODE)
+
+    def test_harvey_modal_pipeline_is_available(self) -> None:
+        self.assertTrue(hasattr(modal_verl_sdpo.prepare_harvey_sdpo_dataset, "remote"))
+        self.assertTrue(callable(modal_verl_sdpo.harvey_main))
+        self.assertEqual("/opt/continuum/run_qwen36_harvey_sdpo_fsdp.sh", modal_verl_sdpo.REMOTE_HARVEY_SDPO_SHELL)
+        self.assertEqual("/opt/harvey-labs", modal_verl_sdpo.REMOTE_HARVEY_LABS_DIR)
+
     def build_args(self, **overrides: object) -> list[str]:
         params = {
             "model": "/cache/models/hf/Qwen_Qwen3_5-0_8B",
@@ -229,6 +240,47 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
         args = self.build_args(save_hf_checkpoint=False)
 
         self.assertIn("trainer.save_freq=-1", args)
+
+    def test_shell_env_can_route_to_harvey_dataset(self) -> None:
+        env = modal_verl_sdpo._build_shell_env(
+            model="/cache/models/Qwen_Qwen3_6-35B-A3B",
+            teacher_model="/cache/models/Qwen_Qwen3_6-35B-A3B",
+            teacher_key="harvey/lab",
+            train_path=Path("/cache/data/harvey_lab_sdpo/train.parquet"),
+            val_path=Path("/cache/data/harvey_lab_sdpo/test.parquet"),
+            reward_path=Path("/cache/runtime/sdpo_reward.py"),
+            run_name="harvey_lab_sdpo-shell-test",
+            total_training_steps=1,
+            total_epochs=1,
+            train_batch_size=1,
+            ppo_mini_batch_size=1,
+            max_prompt_length=4096,
+            max_response_length=1024,
+            max_num_seqs=1,
+            max_num_batched_tokens=6144,
+            n_gpus_per_node=4,
+            tensor_model_parallel_size=4,
+            rollout_expert_parallel_size=4,
+            distillation_n_gpus_per_node=1,
+            distillation_tensor_model_parallel_size=1,
+            distillation_expert_parallel_size=1,
+            rollout_gpu_memory_utilization=0.35,
+            distillation_gpu_memory_utilization=0.9,
+            enable_activation_offload=True,
+            fsdp_model_dtype="bfloat16",
+            ppo_clip_ratio=0.2,
+            distillation_clip_ratio=0.2,
+            distillation_topk=32,
+            distillation_loss_coef=1.0,
+            distillation_loss_max_clamp=10.0,
+            save_hf_checkpoint=False,
+        )
+
+        self.assertEqual("harvey/lab", env["TEACHER_KEY"])
+        self.assertEqual("/cache/data/harvey_lab_sdpo/train.parquet", env["TRAIN_FILE"])
+        self.assertEqual("4", env["NGPUS_PER_NODE"])
+        self.assertEqual("4096", env["MAX_PROMPT_LENGTH"])
+        self.assertEqual("1024", env["MAX_RESPONSE_LENGTH"])
 
     def test_distillation_uses_k1_policy_gradient_with_task_rewards(self) -> None:
         args = self.build_args()

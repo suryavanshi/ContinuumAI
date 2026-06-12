@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from typing import Optional
 
 import modal
 
@@ -35,9 +36,19 @@ MODEL_ROOT = CACHE_DIR / "models" / "hf"
 RUNTIME_DIR = CACHE_DIR / "runtime"
 LOG_DIR = CACHE_DIR / "logs"
 REMOTE_SDPO_SHELL = "/opt/continuum/run_qwen_sdpo_mopd_fsdp.sh"
+REMOTE_HARVEY_SDPO_SHELL = "/opt/continuum/run_qwen36_harvey_sdpo_fsdp.sh"
+REMOTE_HARVEY_PIPELINE = "/opt/continuum/harvey_lab_sdpo_pipeline.py"
+REMOTE_HARVEY_LABS_DIR = "/opt/harvey-labs"
+HARVEY_LABS_LOCAL_DIR = pathlib.Path(
+    os.environ.get("HARVEY_LABS_LOCAL_DIR", "/Users/kb/Documents/proj/git_projs/harvey-labs")
+).expanduser()
+HARVEY_JUDGE_SECRET_NAME = os.environ.get("HARVEY_JUDGE_SECRET_NAME", "")
 
 app = modal.App(APP_NAME)
 cache_volume = modal.Volume.from_name("continuum-verl-sdpo-cache", create_if_missing=True)
+harvey_judge_secrets = (
+    [modal.Secret.from_name(HARVEY_JUDGE_SECRET_NAME)] if HARVEY_JUDGE_SECRET_NAME else []
+)
 
 image = modal.Image.from_registry(VERL_IMAGE_TAG)
 
@@ -84,10 +95,31 @@ image = (
         "rich>=13.7.1",
         "importlib-metadata>=6,<8.8",
         "tilelang",
+        "anthropic>=0.40.0",
+        "openai>=1.0.0",
+        "google-genai",
+        "mistralai",
+        "pandas",
+        "pdfplumber",
+        "markitdown",
+        "python-docx",
+        "openpyxl",
+        "python-pptx",
     )
+    .run_commands("apt-get update && apt-get install -y pandoc && rm -rf /var/lib/apt/lists/*")
     .add_local_file(
         THIS_FILE.parent / "run_qwen_sdpo_mopd_fsdp.sh",
         remote_path=REMOTE_SDPO_SHELL,
+        copy=True,
+    )
+    .add_local_file(
+        THIS_FILE.parent / "run_qwen36_harvey_sdpo_fsdp.sh",
+        remote_path=REMOTE_HARVEY_SDPO_SHELL,
+        copy=True,
+    )
+    .add_local_file(
+        THIS_FILE.parent / "harvey_lab_sdpo_pipeline.py",
+        remote_path=REMOTE_HARVEY_PIPELINE,
         copy=True,
     )
     .env(
@@ -101,6 +133,20 @@ image = (
         }
     )
 )
+
+if HARVEY_LABS_LOCAL_DIR.exists():
+    image = image.add_local_dir(
+        HARVEY_LABS_LOCAL_DIR,
+        remote_path=REMOTE_HARVEY_LABS_DIR,
+        copy=True,
+        ignore=[
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            "results",
+        ],
+    )
 
 
 SDPO_REWARD_CODE = r'''
@@ -136,6 +182,23 @@ def _extract_answer(text):
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None, **_):
     extra_info = extra_info or {}
+    if str(data_source or "") == "harvey/lab":
+        text = _normalize(solution_str)
+        terms = extra_info.get("reward_terms", []) or []
+        if isinstance(terms, str):
+            terms = [terms]
+        cleaned_terms = [_normalize(term) for term in terms if _normalize(term)]
+        hits = sum(1 for term in cleaned_terms if term in text)
+        coverage = hits / max(len(cleaned_terms), 1)
+        length_bonus = 0.2 if len(str(solution_str or "").split()) >= 80 else 0.0
+        refusal_penalty = 0.3 if "cannot provide legal advice" in text or "i can't" in text else 0.0
+        score = max(0.0, min(1.0, coverage + length_bonus - refusal_penalty))
+        return {
+            "score": score,
+            "harvey_reward_terms": len(cleaned_terms),
+            "harvey_reward_hits": hits,
+            "sdpo_feedback_available": bool(extra_info.get("feedback_raw", "")),
+        }
     extracted = _extract_answer(solution_str)
     score = 1.0 if _normalize(extracted) == _normalize(ground_truth) else 0.0
     feedback = extra_info.get("feedback_raw", "")
@@ -436,6 +499,80 @@ def prepare_sdpo_dataset(
     cache_volume.commit()
     train_path, val_path = _dataset_paths(dataset)
     return f"{train_path} and {val_path}"
+
+
+@app.function(
+    image=image,
+    gpu="H200:5",
+    volumes={"/cache": cache_volume},
+    secrets=harvey_judge_secrets,
+    timeout=8 * 60 * 60,
+    startup_timeout=1800,
+    ephemeral_disk=600_000,
+)
+def prepare_harvey_sdpo_dataset(
+    dataset: str = "harvey_lab_sdpo",
+    model: str = "/cache/models/Qwen_Qwen3_6-35B-A3B",
+    train_tasks: int = 8,
+    eval_preview_tasks: int = 2,
+    seed: int = 17,
+    doc_chars: int = 1200,
+    max_prompt_chars: int = 9000,
+    tensor_parallel_size: int = 4,
+    max_model_len: int = 12288,
+    max_new_tokens: int = 1024,
+    judge_model: str = "claude-sonnet-4-6",
+    judge_parallel: int = 2,
+    skip_generation: bool = False,
+    skip_judge_eval: bool = False,
+) -> str:
+    """Generate Harvey LAB attempts, run Harvey eval, and emit SDPO parquet."""
+    bench_root = pathlib.Path(REMOTE_HARVEY_LABS_DIR)
+    if not bench_root.exists():
+        raise RuntimeError(
+            f"Harvey LAB repo was not uploaded to {REMOTE_HARVEY_LABS_DIR}. "
+            "Set HARVEY_LABS_LOCAL_DIR before running Modal if the local clone moved."
+        )
+
+    data_dir = _dataset_dir(dataset)
+    cmd = [
+        sys.executable,
+        REMOTE_HARVEY_PIPELINE,
+        "--bench-root",
+        str(bench_root),
+        "--out-dir",
+        str(data_dir),
+        "--model",
+        model,
+        "--train-tasks",
+        str(train_tasks),
+        "--eval-preview-tasks",
+        str(eval_preview_tasks),
+        "--seed",
+        str(seed),
+        "--doc-chars",
+        str(doc_chars),
+        "--max-prompt-chars",
+        str(max_prompt_chars),
+        "--tensor-parallel-size",
+        str(tensor_parallel_size),
+        "--max-model-len",
+        str(max_model_len),
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--judge-model",
+        judge_model,
+        "--judge-parallel",
+        str(judge_parallel),
+    ]
+    if skip_generation:
+        cmd.append("--skip-generation")
+    if skip_judge_eval:
+        cmd.append("--skip-judge-eval")
+    _run(cmd, cwd="/cache", env=_base_env())
+    cache_volume.commit()
+    manifest_path = data_dir / "manifest.json"
+    return manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else str(data_dir)
 
 
 @app.function(
@@ -960,6 +1097,7 @@ def train_sdpo_shell(
     distillation_loss_coef: float = 1.0,
     distillation_loss_max_clamp: float = 10.0,
     save_hf_checkpoint: bool = False,
+    remote_shell_script: str = REMOTE_SDPO_SHELL,
 ) -> str:
     """Run the OPD-style SDPO shell recipe on Modal."""
     default_train_path, default_val_path = _dataset_paths(dataset)
@@ -1020,7 +1158,7 @@ def train_sdpo_shell(
     print("SDPO shell configuration:", flush=True)
     for key in sorted(shell_env):
         print(f"  {key}={env[key]}", flush=True)
-    print(f"  shell_script={REMOTE_SDPO_SHELL}", flush=True)
+    print(f"  shell_script={remote_shell_script}", flush=True)
     print(f"  log_path={log_path}", flush=True)
 
     _run(
@@ -1049,7 +1187,7 @@ def train_sdpo_shell(
         "}; "
         "trap persist_log EXIT; "
         "set +e; "
-        f"bash {shlex.quote(REMOTE_SDPO_SHELL)} 2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
+        f"bash {shlex.quote(remote_shell_script)} 2>&1 | tee {shlex.quote(str(tmp_log_path))}; "
         "status=${PIPESTATUS[0]}; "
         'exit "${status}"'
     )
@@ -1061,23 +1199,23 @@ def train_sdpo_shell(
 @app.local_entrypoint()
 def main(
     model: str = "Qwen/Qwen3.5-0.8B",
-    self_teacher_model: str | None = None,
+    self_teacher_model: Optional[str] = None,
     dataset: str = "gsm8k_sdpo",
-    train_files: str | None = None,
-    val_files: str | None = None,
+    train_files: Optional[str] = None,
+    val_files: Optional[str] = None,
     teacher_key: str = "openai/gsm8k",
     hf_dataset: str = "openai/gsm8k",
-    hf_config: str | None = "main",
-    hf_train_file: str | None = None,
-    hf_val_file: str | None = None,
+    hf_config: Optional[str] = "main",
+    hf_train_file: Optional[str] = None,
+    hf_val_file: Optional[str] = None,
     train_split: str = "train",
     val_split: str = "test",
     dataset_format: str = "qa",
     conversations_column: str = "conversations",
     prompt_column: str = "question",
     answer_column: str = "answer",
-    feedback_column: str | None = None,
-    previous_attempt_column: str | None = None,
+    feedback_column: Optional[str] = None,
+    previous_attempt_column: Optional[str] = None,
     data_source: str = "openai/gsm8k",
     ability: str = "math",
     train_rows: int = 8,
@@ -1095,9 +1233,9 @@ def main(
     n_gpus_per_node: int = 1,
     tensor_model_parallel_size: int = 1,
     rollout_expert_parallel_size: int = 1,
-    distillation_n_gpus_per_node: int | None = None,
-    distillation_tensor_model_parallel_size: int | None = None,
-    distillation_expert_parallel_size: int | None = None,
+    distillation_n_gpus_per_node: Optional[int] = None,
+    distillation_tensor_model_parallel_size: Optional[int] = None,
+    distillation_expert_parallel_size: Optional[int] = None,
     rollout_gpu_memory_utilization: float = 0.35,
     distillation_gpu_memory_utilization: float = 0.45,
     enable_activation_offload: bool = False,
@@ -1184,3 +1322,134 @@ def main(
         save_hf_checkpoint=save_hf_checkpoint,
     )
     print(f"Training log committed to Modal volume: {log_path}")
+
+
+@app.local_entrypoint()
+def harvey_main(
+    model: str = "/cache/models/Qwen_Qwen3_6-35B-A3B",
+    self_teacher_model: Optional[str] = None,
+    dataset: str = "harvey_lab_sdpo",
+    train_tasks: int = 8,
+    eval_preview_tasks: int = 2,
+    seed: int = 17,
+    doc_chars: int = 1200,
+    max_prompt_chars: int = 9000,
+    prepare_tensor_parallel_size: int = 4,
+    prepare_max_model_len: int = 12288,
+    prepare_max_new_tokens: int = 1024,
+    judge_model: str = "claude-sonnet-4-6",
+    judge_parallel: int = 2,
+    skip_generation: bool = False,
+    skip_judge_eval: bool = False,
+    skip_prepare: bool = False,
+    run_training: bool = True,
+    skip_model_prefetch: bool = True,
+    force_model_download: bool = False,
+    total_training_steps: int = 1,
+    total_epochs: int = 1,
+    train_batch_size: int = 4,
+    ppo_mini_batch_size: int = 4,
+    max_prompt_length: int = 4096,
+    max_response_length: int = 1024,
+    max_num_seqs: int = 1,
+    max_num_batched_tokens: int = 6144,
+    n_gpus_per_node: int = 4,
+    tensor_model_parallel_size: int = 4,
+    rollout_expert_parallel_size: int = 4,
+    distillation_n_gpus_per_node: Optional[int] = 1,
+    distillation_tensor_model_parallel_size: Optional[int] = 1,
+    distillation_expert_parallel_size: Optional[int] = 1,
+    rollout_gpu_memory_utilization: float = 0.35,
+    distillation_gpu_memory_utilization: float = 0.9,
+    enable_activation_offload: bool = True,
+    fsdp_model_dtype: str = "bfloat16",
+    ppo_clip_ratio: float = 0.2,
+    distillation_clip_ratio: float = 0.2,
+    distillation_loss_max_clamp: float = 10.0,
+    save_hf_checkpoint: bool = False,
+    spawn_training: bool = True,
+) -> None:
+    """Prepare Harvey LAB SDPO data and train Qwen3.6-35B-A3B on Modal."""
+    print(f"Modal app: {APP_NAME}")
+    student_model_path = model
+    teacher_model_path = self_teacher_model
+    if not skip_model_prefetch:
+        student_model_path = download_model_hf_cli.remote(
+            model=model,
+            force=force_model_download,
+        )
+        print(f"Student model path: {student_model_path}")
+        if self_teacher_model:
+            teacher_model_path = (
+                student_model_path
+                if self_teacher_model == model
+                else download_model_hf_cli.remote(model=self_teacher_model, force=force_model_download)
+            )
+        else:
+            teacher_model_path = student_model_path
+        print(f"Self-teacher model path: {teacher_model_path}")
+
+    if not teacher_model_path:
+        teacher_model_path = student_model_path
+
+    if not skip_prepare:
+        manifest = prepare_harvey_sdpo_dataset.remote(
+            dataset=dataset,
+            model=student_model_path,
+            train_tasks=train_tasks,
+            eval_preview_tasks=eval_preview_tasks,
+            seed=seed,
+            doc_chars=doc_chars,
+            max_prompt_chars=max_prompt_chars,
+            tensor_parallel_size=prepare_tensor_parallel_size,
+            max_model_len=prepare_max_model_len,
+            max_new_tokens=prepare_max_new_tokens,
+            judge_model=judge_model,
+            judge_parallel=judge_parallel,
+            skip_generation=skip_generation,
+            skip_judge_eval=skip_judge_eval,
+        )
+        print(f"Prepared Harvey data manifest:\n{manifest}")
+
+    if not run_training:
+        print("Skipping training because --run-training=false.")
+        return
+
+    train_kwargs = dict(
+        model=student_model_path,
+        self_teacher_model=teacher_model_path,
+        dataset=dataset,
+        teacher_key="harvey/lab",
+        total_training_steps=total_training_steps,
+        total_epochs=total_epochs,
+        train_batch_size=train_batch_size,
+        ppo_mini_batch_size=ppo_mini_batch_size,
+        max_prompt_length=max_prompt_length,
+        max_response_length=max_response_length,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        n_gpus_per_node=n_gpus_per_node,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        rollout_expert_parallel_size=rollout_expert_parallel_size,
+        distillation_n_gpus_per_node=distillation_n_gpus_per_node,
+        distillation_tensor_model_parallel_size=distillation_tensor_model_parallel_size,
+        distillation_expert_parallel_size=distillation_expert_parallel_size,
+        rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
+        distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
+        enable_activation_offload=enable_activation_offload,
+        fsdp_model_dtype=fsdp_model_dtype,
+        ppo_clip_ratio=ppo_clip_ratio,
+        distillation_clip_ratio=distillation_clip_ratio,
+        distillation_loss_max_clamp=distillation_loss_max_clamp,
+        save_hf_checkpoint=save_hf_checkpoint,
+        remote_shell_script=REMOTE_HARVEY_SDPO_SHELL,
+    )
+    if spawn_training:
+        call = train_sdpo_shell.spawn(**train_kwargs)
+        print(f"Spawned Harvey SDPO training call: {call.object_id or call.local_uuid}")
+        dashboard_url = call.get_dashboard_url()
+        if dashboard_url:
+            print(f"Training call dashboard: {dashboard_url}")
+    else:
+        log_path = train_sdpo_shell.remote(**train_kwargs)
+        print(f"Harvey SDPO training log committed to Modal volume: {log_path}")

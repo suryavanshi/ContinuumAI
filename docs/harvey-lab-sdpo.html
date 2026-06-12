@@ -1,0 +1,957 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Harvey LAB SDPO training on Qwen3.6-35B-A3B</title>
+    <meta
+      name="description"
+      content="Infographic for the ContinuumAI Harvey LAB SDPO smoke run on Modal with Verl, Qwen3.6-35B-A3B, a legal-agent task split, and persisted checkpoint evidence."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172033;
+        --muted: #5f6d7f;
+        --line: #d9e1ea;
+        --paper: #f6f8fb;
+        --panel: #ffffff;
+        --teal: #0f766e;
+        --teal-soft: #ddf3f0;
+        --blue: #3157b7;
+        --blue-soft: #e7edff;
+        --wine: #a73455;
+        --wine-soft: #fbe5ed;
+        --gold: #a66a12;
+        --gold-soft: #fff0ce;
+        --green: #2f7d32;
+        --green-soft: #e3f2de;
+        --slate-soft: #eef2f6;
+        --shadow: 0 18px 54px rgba(23, 32, 51, 0.11);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(180deg, #ffffff 0%, var(--paper) 62%, #ffffff 100%),
+          var(--paper);
+      }
+
+      code {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.92em;
+        overflow-wrap: anywhere;
+      }
+
+      main {
+        width: min(1180px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .hero {
+        min-height: 72vh;
+        display: grid;
+        align-items: center;
+        padding: 58px 0 34px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.92fr) minmax(390px, 1.08fr);
+        gap: 38px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--teal);
+        font-size: 0.82rem;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--teal);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 780px;
+        margin-bottom: 18px;
+        font-size: 5rem;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin-bottom: 8px;
+        font-size: 2.85rem;
+        line-height: 1.06;
+        letter-spacing: 0;
+      }
+
+      h3 {
+        font-size: 1.2rem;
+      }
+
+      .lede {
+        max-width: 720px;
+        margin-bottom: 26px;
+        color: var(--muted);
+        font-size: 1.18rem;
+        line-height: 1.62;
+      }
+
+      .tag-row,
+      .link-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .tag {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.78);
+        padding: 8px 12px;
+        color: #344054;
+        font-size: 0.88rem;
+        font-weight: 760;
+      }
+
+      .run-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: var(--shadow);
+        padding: 18px;
+      }
+
+      .gpu-map {
+        display: grid;
+        grid-template-columns: 1fr 70px 0.78fr;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .gpu-block {
+        min-height: 246px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        background: var(--panel);
+      }
+
+      .gpu-block.student {
+        background: var(--teal-soft);
+        border-color: rgba(15, 118, 110, 0.28);
+      }
+
+      .gpu-block.teacher {
+        background: var(--gold-soft);
+        border-color: rgba(166, 106, 18, 0.3);
+      }
+
+      .gpu-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+        font-weight: 850;
+      }
+
+      .gpu-chip-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .chip {
+        display: grid;
+        place-items: center;
+        min-height: 58px;
+        border: 1px solid rgba(23, 32, 51, 0.12);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.72);
+        font-weight: 850;
+      }
+
+      .teacher .gpu-chip-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        display: grid;
+        place-items: center;
+        align-self: center;
+        width: 70px;
+        min-height: 70px;
+        border-radius: 999px;
+        background: var(--blue-soft);
+        color: var(--blue);
+        font-size: 1.55rem;
+        font-weight: 900;
+      }
+
+      .note {
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.48;
+      }
+
+      section {
+        padding: 54px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 24px;
+      }
+
+      .section-head p {
+        max-width: 590px;
+        color: var(--muted);
+        line-height: 1.58;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .metric {
+        min-height: 166px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 18px;
+        box-shadow: 0 10px 28px rgba(23, 32, 51, 0.06);
+      }
+
+      .metric:nth-child(1) {
+        border-top: 5px solid var(--green);
+      }
+
+      .metric:nth-child(2) {
+        border-top: 5px solid var(--teal);
+      }
+
+      .metric:nth-child(3) {
+        border-top: 5px solid var(--gold);
+      }
+
+      .metric:nth-child(4) {
+        border-top: 5px solid var(--wine);
+      }
+
+      .label {
+        display: block;
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 850;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1.28rem;
+      }
+
+      .metric p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--panel);
+      }
+
+      .phase {
+        min-height: 236px;
+        padding: 20px;
+        border-right: 1px solid var(--line);
+      }
+
+      .phase:last-child {
+        border-right: 0;
+      }
+
+      .phase b {
+        display: inline-grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        margin-bottom: 18px;
+        border-radius: 999px;
+        color: #ffffff;
+        background: var(--ink);
+      }
+
+      .phase h3 {
+        min-height: 56px;
+        margin-bottom: 10px;
+        font-size: 1.05rem;
+      }
+
+      .phase p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.48;
+      }
+
+      .split,
+      .chart-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+        gap: 18px;
+      }
+
+      .panel {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 22px;
+        box-shadow: 0 10px 28px rgba(23, 32, 51, 0.06);
+      }
+
+      .panel h3 {
+        margin-bottom: 12px;
+        font-size: 1.25rem;
+      }
+
+      .list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .list li {
+        min-width: 0;
+        border-left: 5px solid var(--teal);
+        border-radius: 8px;
+        background: var(--slate-soft);
+        padding: 11px 13px;
+        color: var(--muted);
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .list li:nth-child(2n) {
+        border-left-color: var(--blue);
+      }
+
+      .list li:nth-child(3n) {
+        border-left-color: var(--gold);
+      }
+
+      .list li:nth-child(4n) {
+        border-left-color: var(--wine);
+      }
+
+      .task-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .task-list li {
+        min-height: 78px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 12px;
+        color: var(--muted);
+        line-height: 1.38;
+        overflow-wrap: anywhere;
+      }
+
+      .task-list strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--ink);
+        font-size: 0.86rem;
+      }
+
+      .eval-list li {
+        background: var(--gold-soft);
+      }
+
+      .chart-panel {
+        min-height: 390px;
+      }
+
+      .chart-wrap {
+        position: relative;
+        min-height: 280px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background:
+          linear-gradient(180deg, rgba(49, 87, 183, 0.08), transparent 1px) 0 0 / 100% 56px,
+          linear-gradient(90deg, rgba(23, 32, 51, 0.06), transparent 1px) 0 0 / 82px 100%,
+          #ffffff;
+        padding: 16px;
+      }
+
+      .chart-svg {
+        width: 100%;
+        min-height: 230px;
+        display: block;
+      }
+
+      .axis-label {
+        fill: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .dot-label {
+        fill: var(--ink);
+        font-size: 13px;
+        font-weight: 850;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .legend span::before {
+        content: "";
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        background: var(--teal);
+      }
+
+      .legend .distill::before {
+        background: var(--wine);
+      }
+
+      .legend .reward::before {
+        background: var(--gold);
+      }
+
+      .code-block {
+        overflow-x: auto;
+        margin: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #141a24;
+        color: #f7f9fc;
+        padding: 16px;
+        font-size: 0.86rem;
+        line-height: 1.5;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: #ffffff;
+        background: var(--ink);
+        font-weight: 820;
+        text-decoration: none;
+      }
+
+      .button:hover,
+      .button:focus {
+        background: var(--blue);
+      }
+
+      footer {
+        padding: 34px 0 50px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 980px) {
+        main {
+          width: min(100% - 24px, 760px);
+        }
+
+        .hero {
+          min-height: auto;
+          padding-top: 38px;
+        }
+
+        .hero-grid,
+        .gpu-map,
+        .section-head,
+        .split,
+        .chart-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .section-head {
+          display: grid;
+        }
+
+        .arrow {
+          width: 100%;
+          min-height: 50px;
+          border-radius: 8px;
+        }
+
+        h1 {
+          font-size: 3.35rem;
+        }
+
+        h2 {
+          font-size: 2.2rem;
+        }
+
+        .metrics,
+        .pipeline,
+        .task-list {
+          grid-template-columns: 1fr;
+        }
+
+        .phase {
+          min-height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .phase:last-child {
+          border-bottom: 0;
+        }
+      }
+
+      @media (max-width: 560px) {
+        h1 {
+          font-size: 2.7rem;
+        }
+
+        h2 {
+          font-size: 1.9rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">Harvey LAB + SDPO smoke</span>
+            <h1>Legal-agent SDPO on Harvey data.</h1>
+            <p class="lede">
+              A practical ContinuumAI run that adapts the Harvey LAB benchmark
+              into feedback-conditioned Verl parquet, trains
+              <strong>Qwen3.6-35B-A3B</strong> with the current SDPO bridge, and
+              keeps the unused Harvey tasks held out for later evaluation.
+            </p>
+            <div class="tag-row" aria-label="Run tags">
+              <span class="tag">Qwen3.6-35B-A3B</span>
+              <span class="tag">Harvey LAB</span>
+              <span class="tag">8 train tasks</span>
+              <span class="tag">2 eval preview tasks</span>
+              <span class="tag">5x H200 Modal run</span>
+            </div>
+          </div>
+
+          <div class="run-card" aria-label="GPU topology">
+            <div class="gpu-map">
+              <div class="gpu-block student">
+                <div class="gpu-label">
+                  <span>Student policy</span>
+                  <span>FSDP</span>
+                </div>
+                <div class="gpu-chip-grid">
+                  <div class="chip">H200 1</div>
+                  <div class="chip">H200 2</div>
+                  <div class="chip">H200 3</div>
+                  <div class="chip">H200 4</div>
+                </div>
+                <p class="note">
+                  Full model update with four actor ranks, TP 4 / EP 4 rollout,
+                  bf16 model dtype, activation offload, parameter offload, and
+                  optimizer offload.
+                </p>
+              </div>
+              <div class="arrow" aria-hidden="true">+</div>
+              <div class="gpu-block teacher">
+                <div class="gpu-label">
+                  <span>Self-teacher</span>
+                  <span>vLLM</span>
+                </div>
+                <div class="gpu-chip-grid">
+                  <div class="chip">H200 5</div>
+                </div>
+                <p class="note">
+                  Same cached Qwen3.6 checkpoint, TP 1 / EP 1, used for dense
+                  self-distillation guidance keyed by <code>harvey/lab</code>.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Run evidence</span>
+            <h2>What actually completed</h2>
+          </div>
+          <p>
+            The successful Modal run trained for one configured step, emitted
+            final metrics, and persisted both FSDP and Hugging Face checkpoint
+            artifacts under <code>global_step_1</code>. The app stopped after a
+            post-completion DataLoader worker warning.
+          </p>
+        </div>
+
+        <div class="metrics">
+          <div class="metric">
+            <span class="label">Status</span>
+            <strong>1 / 1 step</strong>
+            <p>Final line includes <code>training/global_step:1</code>.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Reward mean</span>
+            <strong>0.4708</strong>
+            <p>Harvey rubric-term reward branch over generated legal outputs.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Checkpoint</span>
+            <strong>global_step_1</strong>
+            <p>Four FSDP rank shards plus a two-shard HF safetensors export.</p>
+          </div>
+          <div class="metric">
+            <span class="label">Step time</span>
+            <strong>495.1 s</strong>
+            <p>353.1 s was checkpoint save time for the 35B model.</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Data split</span>
+            <h2>Seeded, practice-area stratified split</h2>
+          </div>
+          <p>
+            The pipeline discovers every <code>tasks/**/task.json</code>,
+            buckets tasks by top-level Harvey practice area, shuffles each
+            bucket with seed <code>17</code>, then round-robins across practice
+            areas. The first 8 tasks become feedback-conditioned train rows;
+            every remaining task is held out, with 2 heldout tasks materialized
+            into the eval-preview parquet.
+          </p>
+        </div>
+
+        <div class="pipeline">
+          <div class="phase">
+            <b>1</b>
+            <h3>Discover tasks</h3>
+            <p>
+              Read Harvey LAB task metadata, instructions, deliverables,
+              work type, practice area, and rubric criteria.
+            </p>
+          </div>
+          <div class="phase">
+            <b>2</b>
+            <h3>Build prompts</h3>
+            <p>
+              Combine instructions with trimmed excerpts from DOCX, XLSX, EML,
+              text, CSV, JSON, and Markdown source files.
+            </p>
+          </div>
+          <div class="phase">
+            <b>3</b>
+            <h3>Generate attempts</h3>
+            <p>
+              Use Qwen3.6-35B-A3B on Modal to draft the requested legal work
+              products before feedback conditioning.
+            </p>
+          </div>
+          <div class="phase">
+            <b>4</b>
+            <h3>Attach feedback</h3>
+            <p>
+              With no judge secret configured, the run used rubric-derived
+              feedback and reward terms rather than external Harvey judge scores.
+            </p>
+          </div>
+          <div class="phase">
+            <b>5</b>
+            <h3>Write parquet</h3>
+            <p>
+              Emit Verl RLHF parquet with <code>data_source=harvey/lab</code>,
+              previous attempt, feedback, reward terms, and task metadata.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Training rows</span>
+            <h2>The 8 Harvey tasks used for SDPO</h2>
+          </div>
+          <p>
+            These rows are the feedback-conditioned training set in
+            <code>/cache/data/harvey_lab_sdpo/train.parquet</code>. The task
+            names below are the exact Harvey task ids written into
+            <code>extra_info.task_id</code>.
+          </p>
+        </div>
+
+        <ul class="task-list" aria-label="Harvey SDPO training tasks">
+          <li><strong>Antitrust / Competition</strong>extract-relevant-product-market-definitions-from-precedent-decisions</li>
+          <li><strong>Arbitration / International Dispute Resolution</strong>compare-arbitration-clause-vs-institutional-rules-compliance-audit</li>
+          <li><strong>Banking / Finance</strong>draft-forbearance-agreement</li>
+          <li><strong>Bankruptcy / Restructuring</strong>extract-loan-agreement-terms/scenario-02</li>
+          <li><strong>Capital Markets</strong>review-form-10</li>
+          <li><strong>Corporate Governance</strong>draft-remediation-plan-for-sec-examination-deficiency-findings</li>
+          <li><strong>Corporate M&amp;A</strong>identify-management-rollover-agreement-issues</li>
+          <li><strong>Data Privacy / Cybersecurity</strong>draft-cybersecurity-incident-response-policy</li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Heldout preview</span>
+            <h2>Eval data was kept separate</h2>
+          </div>
+          <p>
+            The rest of the Harvey LAB tasks remain held out in the manifest.
+            Two heldout tasks were also converted into
+            <code>/cache/data/harvey_lab_sdpo/test.parquet</code> as an eval
+            preview. They were not used as feedback-conditioned train rows.
+          </p>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h3>Eval-preview tasks</h3>
+            <ul class="list eval-list">
+              <li><strong>Emerging Companies / Venture Capital</strong><br />analyze-counterparty-markup-of-bridge-loan-agreement</li>
+              <li><strong>Employment / Labor</strong><br />compare-employment-discrimination-complaint-against-personnel-file-records</li>
+            </ul>
+          </div>
+
+          <div class="panel">
+            <h3>Why only a preview?</h3>
+            <p class="note">
+              This first Modal run was a smoke gate for the SDPO mechanics:
+              data conversion, prompt filtering, Qwen generation, the custom
+              <code>harvey/lab</code> reward branch, FSDP update, and checkpoint
+              save. Full Harvey judge evaluation should be enabled only after a
+              Modal API secret is configured for the selected judge provider.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Loss curve</span>
+            <h2>One-step loss snapshot</h2>
+          </div>
+          <p>
+            Because this was a one-step smoke, the chart is a single measured
+            point rather than a claimed trend. It is still useful: it proves the
+            rollout, reward, old-log-prob, actor update, distillation term, and
+            checkpoint path all executed together.
+          </p>
+        </div>
+
+        <div class="chart-grid">
+          <div class="panel chart-panel">
+            <h3>Step 1 measured values</h3>
+            <div class="chart-wrap" aria-label="Single-step loss and reward chart">
+              <svg class="chart-svg" viewBox="0 0 720 260" role="img" aria-labelledby="chart-title chart-desc">
+                <title id="chart-title">Harvey SDPO one-step loss and reward snapshot</title>
+                <desc id="chart-desc">A single measured step with actor loss -0.4708, distillation absolute loss 0.0254, and reward mean 0.4708.</desc>
+                <line x1="72" y1="30" x2="72" y2="218" stroke="#aeb8c6" stroke-width="2" />
+                <line x1="72" y1="218" x2="672" y2="218" stroke="#aeb8c6" stroke-width="2" />
+                <text x="54" y="42" class="axis-label">0.6</text>
+                <text x="54" y="124" class="axis-label">0</text>
+                <text x="48" y="218" class="axis-label">-0.6</text>
+                <text x="342" y="246" class="axis-label">global step 1</text>
+
+                <line x1="72" y1="123" x2="672" y2="123" stroke="#d7dee8" stroke-width="2" stroke-dasharray="7 8" />
+                <circle cx="372" cy="197" r="10" fill="#0f766e" />
+                <text x="392" y="202" class="dot-label">actor/loss -0.4708</text>
+                <circle cx="372" cy="119" r="10" fill="#a73455" />
+                <text x="392" y="124" class="dot-label">distill abs 0.0254</text>
+                <circle cx="372" cy="49" r="10" fill="#a66a12" />
+                <text x="392" y="54" class="dot-label">reward mean 0.4708</text>
+              </svg>
+            </div>
+            <div class="legend">
+              <span>Actor loss</span>
+              <span class="distill">Distillation absolute loss</span>
+              <span class="reward">Reward mean</span>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h3>Step metrics</h3>
+            <ul class="list">
+              <li><strong>actor/loss</strong><br /><code>-0.4707865715</code></li>
+              <li><strong>actor/distillation/abs_loss</strong><br /><code>0.0253955205</code></li>
+              <li><strong>actor/distillation/loss</strong><br /><code>0.0000463274</code></li>
+              <li><strong>critic/rewards/mean</strong><br /><code>0.4708333313</code></li>
+              <li><strong>response length</strong><br /><code>512 / 512</code> clipped on all sampled rows</li>
+              <li><strong>prompt length mean</strong><br /><code>2157.75</code> tokens, below the 4096 cap</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Launch config</span>
+            <h2>The settings that made it run</h2>
+          </div>
+          <p>
+            The first batch-size-1 attempt reached training and failed because a
+            one-row tensor batch could not be split over four actor ranks. The
+            completed checkpoint run used batch size 4 and mini-batch size 4.
+          </p>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h3>Core shell environment</h3>
+            <pre class="code-block"><code>STUDENT_MODEL=/cache/models/Qwen_Qwen3_6-35B-A3B
+TEACHER_MODEL=/cache/models/Qwen_Qwen3_6-35B-A3B
+TEACHER_KEY=harvey/lab
+TRAIN_FILE=/cache/data/harvey_lab_sdpo/train.parquet
+VAL_FILE=/cache/data/harvey_lab_sdpo/test.parquet
+NGPUS_PER_NODE=4
+TRAIN_SIZE_BSZ=4
+PPO_MINI_BATCH_SIZE=4
+MAX_PROMPT_LENGTH=4096
+MAX_RESPONSE_LENGTH=512
+ROLLOUT_TP=4
+ROLLOUT_EP=4
+TEACHER_WORLD_SIZE=1
+SAVE_FREQ=1
+TOTAL_TRAINING_STEPS=1
+TOTAL_EPOCHS=1</code></pre>
+          </div>
+
+          <div class="panel">
+            <h3>Durable artifacts</h3>
+            <ul class="list">
+              <li>Modal app: <code>ap-0jiiNIjVSxMfL4U6p8TYrH</code></li>
+              <li>Function call: <code>fc-01KTWWF4W6KCWN526726B38ZXN</code></li>
+              <li>Log: <code>/cache/logs/harvey_lab_sdpo-sdpo-shell-20260612T030212Z.log</code></li>
+              <li>Checkpoint: <code>/cache/checkpoints/harvey_lab_sdpo-sdpo-shell-20260612T030212Z/global_step_1</code></li>
+              <li>HF export: <code>model-00001-of-00002.safetensors</code> and <code>model-00002-of-00002.safetensors</code></li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div>
+            <span class="eyebrow">Practical readout</span>
+            <h2>What this smoke run proves</h2>
+          </div>
+          <p>
+            This is not a claim that Qwen improved on Harvey LAB yet. It is a
+            proof that Harvey LAB data can feed the current ContinuumAI Verl
+            SDPO bridge and produce a persisted Qwen3.6-35B-A3B checkpoint.
+          </p>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <h3>Proven</h3>
+            <ul class="list">
+              <li>Harvey tasks can be transformed into SDPO-style train and eval parquet.</li>
+              <li>All 8 train prompts survived the 4096-token Verl prompt filter.</li>
+              <li>The <code>harvey/lab</code> reward branch returned nonzero rewards.</li>
+              <li>Full-model FSDP Qwen3.6-35B-A3B training completed one step on Modal.</li>
+              <li>The checkpoint was saved as both FSDP rank shards and Hugging Face safetensors.</li>
+            </ul>
+          </div>
+
+          <div class="panel">
+            <h3>Still open</h3>
+            <ul class="list">
+              <li>Enable a Modal judge secret and run Harvey's evaluator instead of rubric fallback feedback.</li>
+              <li>Extend beyond one step and plot a real loss curve across multiple checkpoints.</li>
+              <li>Reduce 512-token response clipping before judging quality.</li>
+              <li>Clean up the post-completion DataLoader worker killed warning.</li>
+              <li>Run the heldout Harvey eval set against base, step 1, and later checkpoints.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Evidence source: Modal logs and volume listings for
+        <code>harvey_lab_sdpo-sdpo-shell-20260612T030212Z</code>. The judge
+        evaluation path is implemented but was skipped in this run because no
+        Modal judge provider secret was configured.
+      </footer>
+    </main>
+  </body>
+</html>
