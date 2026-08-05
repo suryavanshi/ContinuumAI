@@ -686,6 +686,8 @@ def _build_verl_args(
     rollout_gpu_memory_utilization: float,
     distillation_gpu_memory_utilization: float,
     enable_activation_offload: bool,
+    enable_param_offload: bool,
+    enable_optimizer_offload: bool,
     fsdp_model_dtype: str,
     ppo_clip_ratio: float,
     distillation_clip_ratio: float,
@@ -726,8 +728,8 @@ def _build_verl_args(
         f"actor_rollout_ref.actor.clip_ratio_high={ppo_clip_ratio}",
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={ppo_max_token_len_per_gpu}",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=True",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload={enable_param_offload}",
+        f"actor_rollout_ref.actor.fsdp_config.optimizer_offload={enable_optimizer_offload}",
         f"actor_rollout_ref.actor.fsdp_config.model_dtype={fsdp_model_dtype}",
         "actor_rollout_ref.rollout.name=vllm",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={tensor_model_parallel_size}",
@@ -784,15 +786,7 @@ def _build_verl_args(
     ]
 
 
-@app.function(
-    image=image,
-    gpu="H200:5",
-    volumes={"/cache": cache_volume},
-    timeout=7200,
-    startup_timeout=1800,
-    ephemeral_disk=600_000,
-)
-def train_sdpo(
+def _train_sdpo_impl(
     model: str = "Qwen/Qwen3.5-0.8B",
     self_teacher_model: str | None = None,
     dataset: str = "gsm8k_sdpo",
@@ -816,6 +810,8 @@ def train_sdpo(
     rollout_gpu_memory_utilization: float = 0.35,
     distillation_gpu_memory_utilization: float = 0.45,
     enable_activation_offload: bool = False,
+    enable_param_offload: bool = True,
+    enable_optimizer_offload: bool = True,
     fsdp_model_dtype: str = "fp32",
     ppo_clip_ratio: float = 0.2,
     distillation_clip_ratio: float = 0.2,
@@ -887,6 +883,8 @@ def train_sdpo(
         flush=True,
     )
     print(f"  enable_activation_offload={enable_activation_offload}", flush=True)
+    print(f"  enable_param_offload={enable_param_offload}", flush=True)
+    print(f"  enable_optimizer_offload={enable_optimizer_offload}", flush=True)
     print(f"  fsdp_model_dtype={fsdp_model_dtype}", flush=True)
     print(f"  ppo_clip_ratio={ppo_clip_ratio}", flush=True)
     print("  distillation_loss.loss_mode=k1", flush=True)
@@ -937,6 +935,8 @@ def train_sdpo(
         rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
         distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
         enable_activation_offload=enable_activation_offload,
+        enable_param_offload=enable_param_offload,
+        enable_optimizer_offload=enable_optimizer_offload,
         fsdp_model_dtype=fsdp_model_dtype,
         ppo_clip_ratio=ppo_clip_ratio,
         distillation_clip_ratio=distillation_clip_ratio,
@@ -965,6 +965,36 @@ def train_sdpo(
     _run(["bash", "-lc", cmd], env=env)
     cache_volume.commit()
     return str(log_path)
+
+
+@app.function(
+    image=image,
+    gpu="H200:5",
+    volumes={"/cache": cache_volume},
+    timeout=7200,
+    startup_timeout=1800,
+    ephemeral_disk=600_000,
+)
+def train_sdpo(**kwargs) -> str:
+    """Run the standard multi-GPU SDPO executor."""
+    return _train_sdpo_impl(**kwargs)
+
+
+@app.function(
+    image=image,
+    gpu="H100:2",
+    volumes={"/cache": cache_volume},
+    timeout=7200,
+    startup_timeout=1800,
+    ephemeral_disk=600_000,
+)
+def train_sdpo_smoke(**kwargs) -> str:
+    """Run the 0.8B smoke gate with one actor GPU and one teacher GPU."""
+    return _train_sdpo_impl(
+        enable_param_offload=False,
+        enable_optimizer_offload=False,
+        **kwargs,
+    )
 
 
 def _build_shell_env(
@@ -1248,6 +1278,7 @@ def main(
     force_model_download: bool = False,
     skip_prepare: bool = False,
     run_shell_script: bool = False,
+    smoke_gpu: bool = False,
 ) -> None:
     print(f"Modal app: {APP_NAME}")
     student_model_path = model
@@ -1290,7 +1321,7 @@ def main(
             static_feedback=static_feedback,
         )
         print(f"Prepared data: {prepared}")
-    train_func = train_sdpo_shell if run_shell_script else train_sdpo
+    train_func = train_sdpo_shell if run_shell_script else (train_sdpo_smoke if smoke_gpu else train_sdpo)
     log_path = train_func.remote(
         model=student_model_path,
         self_teacher_model=teacher_model_path,
@@ -1315,7 +1346,10 @@ def main(
         rollout_gpu_memory_utilization=rollout_gpu_memory_utilization,
         distillation_gpu_memory_utilization=distillation_gpu_memory_utilization,
         enable_activation_offload=enable_activation_offload,
-        fsdp_model_dtype=fsdp_model_dtype,
+        # Qwen3.5's recurrent-attention kernels are not safe in the FP32 path
+        # used by this Torch/vLLM image. The tiny H100 smoke preset therefore
+        # follows the repository's production recipes and uses BF16.
+        fsdp_model_dtype="bfloat16" if smoke_gpu else fsdp_model_dtype,
         ppo_clip_ratio=ppo_clip_ratio,
         distillation_clip_ratio=distillation_clip_ratio,
         distillation_loss_max_clamp=distillation_loss_max_clamp,

@@ -27,6 +27,13 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
     def test_hf_cli_downloader_is_available(self) -> None:
         self.assertTrue(hasattr(modal_verl_sdpo.download_model_hf_cli, "remote"))
 
+    def test_small_sdpo_smoke_has_a_dedicated_executor(self) -> None:
+        self.assertTrue(hasattr(modal_verl_sdpo.train_sdpo_smoke, "remote"))
+
+    def test_local_entrypoint_forces_bfloat16_for_smoke(self) -> None:
+        source = Path(modal_verl_sdpo.__file__).read_text(encoding="utf-8")
+        self.assertIn('fsdp_model_dtype="bfloat16" if smoke_gpu else fsdp_model_dtype', source)
+
     def test_dataset_prepare_writes_plain_parquet_without_hf_metadata(self) -> None:
         script = modal_verl_sdpo._prepare_sdpo_dataset_script(
             out_dir=Path("/cache/data/gsm8k_sdpo"),
@@ -126,6 +133,8 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
             "rollout_gpu_memory_utilization": 0.35,
             "distillation_gpu_memory_utilization": 0.45,
             "enable_activation_offload": False,
+            "enable_param_offload": False,
+            "enable_optimizer_offload": False,
             "fsdp_model_dtype": "fp32",
             "ppo_clip_ratio": 0.2,
             "distillation_clip_ratio": 0.2,
@@ -157,6 +166,8 @@ class ModalVerlSdpoArgsTest(unittest.TestCase):
         self.assertIn("actor_rollout_ref.rollout.expert_parallel_size=1", args)
         self.assertIn("actor_rollout_ref.rollout.gpu_memory_utilization=0.35", args)
         self.assertIn("actor_rollout_ref.model.enable_activation_offload=False", args)
+        self.assertIn("actor_rollout_ref.actor.fsdp_config.param_offload=False", args)
+        self.assertIn("actor_rollout_ref.actor.fsdp_config.optimizer_offload=False", args)
         self.assertIn("actor_rollout_ref.actor.fsdp_config.model_dtype=fp32", args)
         self.assertIn("trainer.n_gpus_per_node=1", args)
         self.assertIn("trainer.total_epochs=1", args)

@@ -15,6 +15,11 @@ Verl, Slime, and Training Gym without modifying those framework repos.
 
 - [POST_TRAINING_PLAN.md](POST_TRAINING_PLAN.md): the overall implementation
   plan for open-model post-training on Modal.
+- [docs/platform-roadmap.md](docs/platform-roadmap.md): the prioritized plan for
+  production security, multi-user access, durable jobs, compute management,
+  evaluations, checkpoints, and Verl GRPO-family support.
+- [docs/platform-handoff.md](docs/platform-handoff.md): the current platform
+  implementation, deployment, smoke-run results, operations, and known gaps.
 - [MODAL_SKILL.md](MODAL_SKILL.md): a secret-free Modal training runbook for
   launching, monitoring, and debugging GPU jobs.
 - [docs/opd-learnings.md](docs/opd-learnings.md): practical notes from the
@@ -55,6 +60,69 @@ ContinuumAI treats post-training as a loop:
    self-teacher.
 4. Update the policy with RL and distillation losses.
 5. Evaluate drift, regressions, cost, and task improvement before continuing.
+
+## Experiment Console
+
+The repository includes a local front- and backend for inspecting SDPO/OPD
+runs, modeled on the workflow needed to productionize self-distillation:
+
+- configure SDPO, OPD, Harvey LAB, and Kimi experiments from the existing
+  Modal launchers;
+- inspect loss and reward curves, sampled trajectories, privileged hints, and
+  token-level teacher/student preference deltas;
+- ingest metrics, traces, and logs through a small JSON API; and
+- preview the exact argv-safe Modal command before launch.
+
+Start it with Python only (no frontend build step or extra packages):
+
+```bash
+python3 -m continuum_console.api --port 8787
+```
+
+Then open `http://127.0.0.1:8787`. Runs are stored in
+`.continuum/runs.json`. Remote launch is deliberately gated; set
+`CONTINUUM_ENABLE_LAUNCH=1` only in an environment where submitting detached
+Modal jobs is intended.
+
+Authentication is mandatory for a public deployment. Local development can
+enable the same signed, HTTP-only session flow with:
+
+```bash
+CONTINUUM_REQUIRE_AUTH=1 \
+CONTINUUM_ADMIN_PASSWORD='<12+ character password>' \
+CONTINUUM_SESSION_SECRET='<32+ random characters>' \
+python3 -m continuum_console.api --port 8787
+```
+
+For Modal, create the authentication secret without adding values to the
+repository, then deploy the included web-server wrapper:
+
+```bash
+modal secret create continuum-console-auth \
+  CONTINUUM_ADMIN_USER=admin \
+  CONTINUUM_ADMIN_PASSWORD='<strong password>' \
+  CONTINUUM_SESSION_SECRET='<random 32+ character value>'
+
+modal deploy continuum_console/modal_app.py
+```
+
+The deployment uses a single autoscaling control-plane container and the
+`continuum-console-data` Modal Volume for run state. The app binds to
+`0.0.0.0`, uses secure signed cookies, rejects cross-origin mutations, caps
+training steps and dataset sizes, allowlists models, requires an exact run-ID
+launch confirmation, and uses Modal's built-in workload identity for backend
+GPU submissions. Modal intentionally ignores account-token environment
+variables inside containers, so no account token is copied into the image or
+attached as an application Secret.
+
+GUI smoke runs use the repository's x86-compatible `verlai/verl:vllm020.dev1`
+image by default to remain compatible with workspaces still on Modal's legacy
+Image Builder. Override it with `CONTINUUM_SMOKE_VERL_IMAGE_TAG` after upgrading
+the workspace Image Builder and validating a newer image.
+
+Useful API endpoints are `GET /api/catalog`, `GET/POST /api/runs`,
+`GET /api/runs/:id`, `POST /api/runs/:id/ingest`, and
+`POST /api/runs/:id/launch`.
 
 ## Training Patterns
 

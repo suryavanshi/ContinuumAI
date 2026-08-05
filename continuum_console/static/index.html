@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Continuum — Self-distillation console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">C</span><span>Continuum</span></a>
+      <nav>
+        <p class="nav-label">Workspace</p>
+        <button class="nav-item active"><span>◫</span> Training runs</button>
+        <button class="nav-item"><span>◇</span> Evaluations</button>
+        <button class="nav-item"><span>⌁</span> Checkpoints</button>
+        <p class="nav-label">Operations</p>
+        <button class="nav-item"><span>⌘</span> Jobs</button>
+        <button class="nav-item"><span>◎</span> Compute</button>
+        <button class="nav-item"><span>⚙</span> Settings</button>
+      </nav>
+      <div class="workspace-chip"><span class="pulse"></span><div><b>Local workspace</b><small>Modal launch gated</small></div></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">TRAINING / RUNS</p><h1>Self-distillation</h1></div>
+        <div class="top-actions"><select id="run-select" aria-label="Select run"></select><button id="launch-run" class="secondary" hidden>Launch on Modal</button><button id="new-run" class="primary">＋ New run</button><button id="logout" class="icon-button" title="Sign out">↪</button></div>
+      </header>
+
+      <section id="run-header" class="run-header"></section>
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="advanced">Advanced metrics</button>
+        <button class="tab" data-tab="logs">Logs</button>
+        <button class="tab" data-tab="config">Config</button>
+      </div>
+
+      <section id="overview" class="tab-panel active">
+        <div id="stat-grid" class="stat-grid"></div>
+        <div class="workbench">
+          <div class="left-column">
+            <article class="card chart-card">
+              <div class="card-heading"><div><p class="eyebrow">TRAINING SIGNAL</p><h2>Distillation loss</h2></div><span class="legend"><i></i> reverse KL</span></div>
+              <div id="loss-chart" class="chart"></div>
+            </article>
+            <article class="card">
+              <div class="card-heading"><div><p class="eyebrow">DATASET</p><h2>Trajectory steps</h2></div><span id="trace-count" class="muted"></span></div>
+              <div class="table-wrap"><table><thead><tr><th>Trace</th><th>Reward</th><th>Teacher KL</th><th>Judge picks</th><th></th></tr></thead><tbody id="trace-rows"></tbody></table></div>
+            </article>
+          </div>
+          <article class="card inspector">
+            <div class="card-heading sticky"><div><p class="eyebrow">TRACE INSPECTOR</p><h2 id="trace-title">Select a trace</h2></div><span id="trace-reward" class="status"></span></div>
+            <div id="trace-detail"></div>
+          </article>
+        </div>
+      </section>
+      <section id="advanced" class="tab-panel"><article class="card"><h2>Teacher / student diagnostics</h2><p class="muted">Per-step teacher KL, reward, and selected-token counts are available through the run API.</p><div id="advanced-table"></div></article></section>
+      <section id="logs" class="tab-panel"><article class="card"><div class="card-heading"><h2>Run logs</h2><button id="copy-command" class="secondary">Copy launch command</button></div><pre id="log-output"></pre></article></section>
+      <section id="config" class="tab-panel"><article class="card"><h2>Run configuration</h2><pre id="config-output"></pre></article></section>
+    </main>
+  </div>
+
+  <dialog id="run-dialog">
+    <form id="run-form">
+      <div class="dialog-heading"><div><p class="eyebrow">NEW EXPERIMENT</p><h2>Configure a training run</h2></div><button type="button" id="close-dialog" class="icon-button">×</button></div>
+      <div class="form-grid">
+        <label>Run name<input name="name" value="production_feedback_sdpo" required></label>
+        <label>Method<select name="algorithm" id="algorithm"></select></label>
+        <label>Student model<select name="model" id="model"></select></label>
+        <label>Teacher model<input name="teacher_model" value="Qwen/Qwen3.5-0.8B"></label>
+        <label class="wide">Dataset<input name="dataset" value="production_traces" required></label>
+        <label>Training steps<input name="steps" type="number" min="1" value="20"></label>
+        <label>Train rows<input name="train_rows" type="number" min="1" value="64"></label>
+        <label>Validation rows<input name="val_rows" type="number" min="1" value="16"></label>
+        <label>Hint placement<select name="hint_placement" id="hint-placement"></select></label>
+        <label>Compute preset<select name="smoke_gpu"><option value="true">H100 ×2 smoke</option><option value="false">H200 ×5 standard</option></select></label>
+        <label class="wide">Privileged feedback / hint<textarea name="hint" rows="3" placeholder="Describe what the teacher should know at the failure point…"></textarea></label>
+      </div>
+      <p id="form-error" class="form-error"></p>
+      <div class="dialog-actions"><button type="button" id="cancel-dialog" class="secondary">Cancel</button><button class="primary" type="submit">Create draft</button></div>
+    </form>
+  </dialog>
+  <dialog id="launch-dialog">
+    <div class="launch-confirm">
+      <div class="dialog-heading"><div><p class="eyebrow">GPU SUBMISSION</p><h2>Confirm Modal launch</h2></div><button type="button" id="close-launch" class="icon-button">×</button></div>
+      <p id="launch-summary" class="launch-summary"></p>
+      <p class="muted">This starts billable GPU resources. The run ID confirmation and server-side limits are checked again by the backend.</p>
+      <div class="dialog-actions"><button type="button" id="cancel-launch" class="secondary">Cancel</button><button type="button" id="confirm-launch" class="primary">Launch smoke</button></div>
+    </div>
+  </dialog>
+  <div id="auth-gate" class="auth-gate" hidden>
+    <form id="login-form" class="login-card">
+      <span class="brand-mark">C</span>
+      <p class="eyebrow">CONTINUUM CONTROL PLANE</p>
+      <h1>Sign in</h1>
+      <p class="muted">Authenticate before viewing runs or starting GPU work.</p>
+      <label>Username<input name="username" autocomplete="username" value="admin" required></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="form-error"></p>
+      <button class="primary" type="submit">Continue</button>
+    </form>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
